@@ -206,6 +206,10 @@ type Config struct {
 	// Block visit marker file config
 	BlockVisitMarkerTimeout            time.Duration `yaml:"block_visit_marker_timeout"`
 	BlockVisitMarkerFileUpdateInterval time.Duration `yaml:"block_visit_marker_file_update_interval"`
+
+	// Partitioning config
+	PartitionIndexSizeLimitInBytes int64 `yaml:"partition_index_size_limit_in_bytes"`
+	PartitionSeriesCountLimit      int64 `yaml:"partition_series_count_limit"`
 }
 
 // RegisterFlags registers the Compactor flags.
@@ -242,6 +246,9 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 
 	f.DurationVar(&cfg.BlockVisitMarkerTimeout, "compactor.block-visit-marker-timeout", 5*time.Minute, "How long block visit marker file should be considered as expired and able to be picked up by compactor again.")
 	f.DurationVar(&cfg.BlockVisitMarkerFileUpdateInterval, "compactor.block-visit-marker-file-update-interval", 1*time.Minute, "How frequently block visit marker file should be updated duration compaction.")
+
+	f.Int64Var(&cfg.PartitionIndexSizeLimitInBytes, "compactor.partition-index-size-limit-in-bytes", 0, "Index size limit in bytes for each compaction partition. 0 means no limit")
+	f.Int64Var(&cfg.PartitionSeriesCountLimit, "compactor.partition-series-count-limit", 0, "Time series count limit for each compaction partition. 0 means no limit")
 }
 
 func (cfg *Config) Validate(limits validation.Limits) error {

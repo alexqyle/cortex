@@ -177,7 +177,7 @@ func (s *Syncer) GarbageCollect(ctx context.Context) error {
 		if _, exists := deletionMarkMap[id]; exists {
 			continue
 		}
-		garbageIDs = append(garbageIDs, id)
+		//garbageIDs = append(garbageIDs, id)
 	}
 
 	for _, id := range garbageIDs {
@@ -350,6 +350,9 @@ type Group struct {
 	hashFunc                      metadata.HashFunc
 	blockFilesConcurrency         int
 	compactBlocksFetchConcurrency int
+	partitionNumber               int
+	partitionID                   int
+
 }
 
 // NewGroup returns a new compaction group.
@@ -488,6 +491,19 @@ func (cg *Group) Labels() labels.Labels {
 // Resolution returns the common downsampling resolution of blocks in the group.
 func (cg *Group) Resolution() int64 {
 	return cg.resolution
+}
+
+func (cg *Group) PartitionNumber() int {
+	return cg.partitionNumber
+}
+
+func (cg *Group) PartitionID() int {
+	return cg.partitionID
+}
+
+func (cg *Group) SetPartitionInfo(partitionNumber int, partitionID int) {
+	cg.partitionNumber = partitionNumber
+	cg.partitionID = partitionID
 }
 
 // CompactProgressMetrics contains Prometheus metrics related to compaction progress.
@@ -747,6 +763,8 @@ type Compactor interface {
 	//  * The source dirs are marked Deletable.
 	//  * Returns empty ulid.ULID{}.
 	Compact(dest string, dirs []string, open []*tsdb.Block) (ulid.ULID, error)
+
+	CompactWithPartition(dest string, dirs []string, open []*tsdb.Block, partitionCount int, partitionId int) (ulid.ULID, error)
 }
 
 // Compact plans and runs a single compaction against the group. The compacted result
@@ -1072,7 +1090,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 
 	begin = time.Now()
 	if err := tracing.DoInSpanWithErr(ctx, "compaction", func(ctx context.Context) (e error) {
-		compID, e = comp.Compact(dir, toCompactDirs, nil)
+		compID, e = comp.CompactWithPartition(dir, toCompactDirs, nil, cg.partitionNumber, cg.partitionID)
 		return e
 	}); err != nil {
 		return false, ulid.ULID{}, halt(errors.Wrapf(err, "compact blocks %v", toCompactDirs))
