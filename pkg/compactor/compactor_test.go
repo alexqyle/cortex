@@ -1578,12 +1578,21 @@ func (m *tsdbCompactorMock) Compact(dest string, dirs []string, open []*tsdb.Blo
 	return args.Get(0).(ulid.ULID), args.Error(1)
 }
 
+func (m *tsdbCompactorMock) CompactWithPartition(dest string, dirs []string, open []*tsdb.Block, partitionCount int, partitionId int) (ulid.ULID, error) {
+	args := m.Called(dest, dirs, open)
+	return args.Get(0).(ulid.ULID), args.Error(1)
+}
+
 type tsdbPlannerMock struct {
 	mock.Mock
 	noCompactMarkFilters []*compact.GatherNoCompactionMarkFilter
 }
 
 func (m *tsdbPlannerMock) Plan(ctx context.Context, metasByMinTime []*metadata.Meta) ([]*metadata.Meta, error) {
+	args := m.Called(ctx, metasByMinTime)
+	return args.Get(0).([]*metadata.Meta), args.Error(1)
+}
+func (m *tsdbPlannerMock) PlanWithPartition(ctx context.Context, metasByMinTime []*metadata.Meta, partitionID int, errChan chan error) ([]*metadata.Meta, error) {
 	args := m.Called(ctx, metasByMinTime)
 	return args.Get(0).([]*metadata.Meta), args.Error(1)
 }

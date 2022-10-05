@@ -350,7 +350,7 @@ type Group struct {
 	hashFunc                      metadata.HashFunc
 	blockFilesConcurrency         int
 	compactBlocksFetchConcurrency int
-	partitionNumber               int
+	partitionCount                int
 	partitionID                   int
 
 }
@@ -493,16 +493,16 @@ func (cg *Group) Resolution() int64 {
 	return cg.resolution
 }
 
-func (cg *Group) PartitionNumber() int {
-	return cg.partitionNumber
+func (cg *Group) PartitionCount() int {
+	return cg.partitionCount
 }
 
 func (cg *Group) PartitionID() int {
 	return cg.partitionID
 }
 
-func (cg *Group) SetPartitionInfo(partitionNumber int, partitionID int) {
-	cg.partitionNumber = partitionNumber
+func (cg *Group) SetPartitionInfo(partitionCount int, partitionID int) {
+	cg.partitionCount = partitionCount
 	cg.partitionID = partitionID
 }
 
@@ -744,6 +744,8 @@ type Planner interface {
 	// Plan returns a list of blocks that should be compacted into single one.
 	// The blocks can be overlapping. The provided metadata has to be ordered by minTime.
 	Plan(ctx context.Context, metasByMinTime []*metadata.Meta) ([]*metadata.Meta, error)
+
+	PlanWithPartition(ctx context.Context, metasByMinTime []*metadata.Meta, partitionID int, errChan chan error) ([]*metadata.Meta, error)
 }
 
 // Compactor provides compaction against an underlying storage of time series data.
@@ -790,7 +792,9 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 	}
 
 	err := tracing.DoInSpanWithErr(ctx, "compaction_group", func(ctx context.Context) (err error) {
-		shouldRerun, compID, err = cg.compact(ctx, subDir, planner, comp)
+		errChan := make(chan error)
+		shouldRerun, compID, err = cg.compact(ctx, subDir, planner, comp, errChan)
+		errChan <- err
 		return err
 	}, opentracing.Tags{"group.key": cg.Key()})
 	if err != nil {
@@ -992,7 +996,7 @@ func RepairIssue347(ctx context.Context, logger log.Logger, bkt objstore.Bucket,
 	return nil
 }
 
-func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp Compactor) (shouldRerun bool, compID ulid.ULID, _ error) {
+func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp Compactor, errChan chan error) (shouldRerun bool, compID ulid.ULID, _ error) {
 	cg.mtx.Lock()
 	defer cg.mtx.Unlock()
 
@@ -1010,8 +1014,13 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 
 	var toCompact []*metadata.Meta
 	if err := tracing.DoInSpanWithErr(ctx, "compaction_planning", func(ctx context.Context) (e error) {
-		toCompact, e = planner.Plan(ctx, cg.metasByMinTime)
-		return e
+		if cg.partitionCount > 0 {
+			toCompact, e = planner.PlanWithPartition(ctx, cg.metasByMinTime, cg.partitionID, errChan)
+			return e
+		} else {
+			toCompact, e = planner.Plan(ctx, cg.metasByMinTime)
+			return e
+		}
 	}); err != nil {
 		return false, ulid.ULID{}, errors.Wrap(err, "plan compaction")
 	}
@@ -1090,7 +1099,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 
 	begin = time.Now()
 	if err := tracing.DoInSpanWithErr(ctx, "compaction", func(ctx context.Context) (e error) {
-		compID, e = comp.CompactWithPartition(dir, toCompactDirs, nil, cg.partitionNumber, cg.partitionID)
+		compID, e = comp.CompactWithPartition(dir, toCompactDirs, nil, cg.partitionCount, cg.partitionID)
 		return e
 	}); err != nil {
 		return false, ulid.ULID{}, halt(errors.Wrapf(err, "compact blocks %v", toCompactDirs))
