@@ -52,17 +52,14 @@ type BlocksCleaner struct {
 	blocksCleanedTotal                prometheus.Counter
 	blocksFailedTotal                 prometheus.Counter
 	blocksMarkedForDeletion           prometheus.Counter
-	blockVisitMarkerReadFailed        prometheus.Counter
 	tenantBlocks                      *prometheus.GaugeVec
 	tenantBlocksMarkedForDelete       *prometheus.GaugeVec
 	tenantBlocksMarkedForNoCompaction *prometheus.GaugeVec
 	tenantPartialBlocks               *prometheus.GaugeVec
 	tenantBucketIndexLastUpdate       *prometheus.GaugeVec
-
-	isPartitionCompactionEnabled bool
 }
 
-func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, usersScanner *cortex_tsdb.UsersScanner, cfgProvider ConfigProvider, logger log.Logger, reg prometheus.Registerer, isPartitionCompactionEnabled bool, blockVisitMarkerReadFailed prometheus.Counter) *BlocksCleaner {
+func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, usersScanner *cortex_tsdb.UsersScanner, cfgProvider ConfigProvider, logger log.Logger, reg prometheus.Registerer) *BlocksCleaner {
 	c := &BlocksCleaner{
 		cfg:          cfg,
 		bucketClient: bucketClient,
@@ -98,7 +95,6 @@ func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, use
 			Help:        blocksMarkedForDeletionHelp,
 			ConstLabels: prometheus.Labels{"reason": "retention"},
 		}),
-		blockVisitMarkerReadFailed: blockVisitMarkerReadFailed,
 
 		// The following metrics don't have the "cortex_compactor" prefix because not strictly related to
 		// the compactor. They're just tracked by the compactor because it's the most logical place where these
@@ -123,8 +119,6 @@ func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, use
 			Name: "cortex_bucket_index_last_successful_update_timestamp_seconds",
 			Help: "Timestamp of the last successful update of a tenant's bucket index.",
 		}, []string{"user"}),
-
-		isPartitionCompactionEnabled: isPartitionCompactionEnabled,
 	}
 
 	c.Service = services.NewTimerService(cfg.CleanupInterval, c.starting, c.ticker, nil)
@@ -289,6 +283,13 @@ func (c *BlocksCleaner) deleteUserMarkedForDeletion(ctx context.Context, userID 
 		level.Info(userLogger).Log("msg", "deleted files under "+block.DebugMetas+" for tenant marked for deletion", "count", deleted)
 	}
 
+	// Clean up partitioned group info files
+	if deleted, err := bucket.DeletePrefix(ctx, userBucket, PartitionedGroupDirectory, userLogger); err != nil {
+		return errors.Wrap(err, "failed to delete "+PartitionedGroupDirectory)
+	} else if deleted > 0 {
+		level.Info(userLogger).Log("msg", "deleted files under "+PartitionedGroupDirectory+" for tenant marked for deletion", "count", deleted)
+	}
+
 	// Tenant deletion mark file is inside Markers as well.
 	if deleted, err := bucket.DeletePrefix(ctx, userBucket, bucketindex.MarkersPathname, userLogger); err != nil {
 		return errors.Wrap(err, "failed to delete marker files")
@@ -355,11 +356,6 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 			continue
 		}
 
-		if c.isPartitionCompactionEnabled && !c.allPartitionCompleted(ctx, userBucket, userLogger, mark.ID) {
-			level.Debug(userLogger).Log("msg", "not all partition is completed", "block", mark.ID)
-			continue
-		}
-
 		if err := block.Delete(ctx, userLogger, userBucket, mark.ID); err != nil {
 			c.blocksFailedTotal.Inc()
 			level.Warn(userLogger).Log("msg", "failed to delete block marked for deletion", "block", mark.ID, "err", err)
@@ -391,33 +387,6 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 	c.tenantPartialBlocks.WithLabelValues(userID).Set(float64(len(partials)))
 
 	return nil
-}
-
-func (c *BlocksCleaner) allPartitionCompleted(ctx context.Context, userBucket objstore.InstrumentedBucket, userLogger log.Logger, blockID ulid.ULID) bool {
-	blockVisitMarkers, err := ReadAllBlockVisitMarker(ctx, userBucket, userLogger, blockID.String(), c.blockVisitMarkerReadFailed)
-	if err != nil {
-		level.Warn(userLogger).Log("msg", "unable to read all visit markers for block", "block", blockID)
-		return false
-	}
-	if len(blockVisitMarkers) == 0 {
-		return true
-	}
-	partitionedGroupID := blockVisitMarkers[0].PartitionedGroupID
-	partitionedGroupInfo, err := ReadPartitionedGroupInfo(ctx, userBucket, userLogger, partitionedGroupID)
-	if err != nil {
-		level.Warn(userLogger).Log("msg", "unable to read partitioned group info", "partitionedGroupID", partitionedGroupID)
-		return false
-	}
-	blockVisitMarkersMap := make(map[int]BlockVisitMarker)
-	for _, blockVisitMarker := range blockVisitMarkers {
-		blockVisitMarkersMap[blockVisitMarker.PartitionID] = blockVisitMarker
-	}
-	for _, partitionID := range partitionedGroupInfo.getPartitionIDsByBlock(blockID) {
-		if blockVisitMarker, ok := blockVisitMarkersMap[partitionID]; !ok || !blockVisitMarker.isCompleted() {
-			return false
-		}
-	}
-	return true
 }
 
 // cleanUserPartialBlocks delete partial blocks which are safe to be deleted. The provided partials map

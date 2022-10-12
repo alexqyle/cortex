@@ -52,9 +52,11 @@ type ShuffleShardingGrouper struct {
 	ringLifecyclerAddr string
 	ringLifecyclerID   string
 
-	blockVisitMarkerTimeout     time.Duration
-	blockVisitMarkerReadFailed  prometheus.Counter
-	blockVisitMarkerWriteFailed prometheus.Counter
+	blockVisitMarkerTimeout         time.Duration
+	blockVisitMarkerReadFailed      prometheus.Counter
+	blockVisitMarkerWriteFailed     prometheus.Counter
+	partitionedGroupInfoReadFailed  prometheus.Counter
+	partitionedGroupInfoWriteFailed prometheus.Counter
 }
 
 func NewShuffleShardingGrouper(
@@ -81,6 +83,8 @@ func NewShuffleShardingGrouper(
 	blockVisitMarkerTimeout time.Duration,
 	blockVisitMarkerReadFailed prometheus.Counter,
 	blockVisitMarkerWriteFailed prometheus.Counter,
+	partitionedGroupInfoReadFailed prometheus.Counter,
+	partitionedGroupInfoWriteFailed prometheus.Counter,
 ) *ShuffleShardingGrouper {
 	if logger == nil {
 		logger = log.NewNopLogger()
@@ -119,18 +123,20 @@ func NewShuffleShardingGrouper(
 			Name: "thanos_compact_group_vertical_compactions_total",
 			Help: "Total number of group compaction attempts that resulted in a new block based on overlapping blocks.",
 		}, []string{"group"}),
-		compactorCfg:                compactorCfg,
-		ring:                        ring,
-		ringLifecyclerAddr:          ringLifecyclerAddr,
-		ringLifecyclerID:            ringLifecyclerID,
-		limits:                      limits,
-		userID:                      userID,
-		blockFilesConcurrency:       blockFilesConcurrency,
-		blocksFetchConcurrency:      blocksFetchConcurrency,
-		compactionConcurrency:       compactionConcurrency,
-		blockVisitMarkerTimeout:     blockVisitMarkerTimeout,
-		blockVisitMarkerReadFailed:  blockVisitMarkerReadFailed,
-		blockVisitMarkerWriteFailed: blockVisitMarkerWriteFailed,
+		compactorCfg:                    compactorCfg,
+		ring:                            ring,
+		ringLifecyclerAddr:              ringLifecyclerAddr,
+		ringLifecyclerID:                ringLifecyclerID,
+		limits:                          limits,
+		userID:                          userID,
+		blockFilesConcurrency:           blockFilesConcurrency,
+		blocksFetchConcurrency:          blocksFetchConcurrency,
+		compactionConcurrency:           compactionConcurrency,
+		blockVisitMarkerTimeout:         blockVisitMarkerTimeout,
+		blockVisitMarkerReadFailed:      blockVisitMarkerReadFailed,
+		blockVisitMarkerWriteFailed:     blockVisitMarkerWriteFailed,
+		partitionedGroupInfoReadFailed:  partitionedGroupInfoReadFailed,
+		partitionedGroupInfoWriteFailed: partitionedGroupInfoWriteFailed,
 	}
 }
 
@@ -215,37 +221,38 @@ mainLoop:
 		groupHash := hashGroup(g.userID, group.rangeStart, group.rangeEnd)
 
 		partitionedGroupInfo := g.partitionBlockGroup(group, groupHash)
-		updatedPartitionedGroupInfo, err := UpdatePartitionedGroupInfo(g.ctx, g.bkt, g.logger, partitionedGroupInfo)
+		updatedPartitionedGroupInfo, err := UpdatePartitionedGroupInfo(g.ctx, g.bkt, g.logger, partitionedGroupInfo, g.partitionedGroupInfoReadFailed, g.partitionedGroupInfoWriteFailed)
 		if err != nil {
 			level.Warn(g.logger).Log("msg", "unable to update partitioned group info", "partitioned_group_id", partitionedGroupInfo.PartitionedGroupID, "err", err)
 			continue
 		}
 		level.Debug(g.logger).Log("msg", "generated partitioned groups", "groups", updatedPartitionedGroupInfo)
 
-		partitionCount := partitionedGroupInfo.PartitionCount
-		for _, partition := range partitionedGroupInfo.Partitions {
+		partitionedGroupID := updatedPartitionedGroupInfo.PartitionedGroupID
+		partitionCount := updatedPartitionedGroupInfo.PartitionCount
+		for _, partition := range updatedPartitionedGroupInfo.Partitions {
 			partitionID := partition.PartitionID
-			partitionedGroup, err := createBlocksGroup(blocks, partition.Blocks, partitionedGroupInfo.RangeStart, partitionedGroupInfo.RangeEnd)
+			partitionedGroup, err := createBlocksGroup(blocks, partition.Blocks, updatedPartitionedGroupInfo.RangeStart, updatedPartitionedGroupInfo.RangeEnd)
 			if err != nil {
-				level.Error(g.logger).Log("msg", "unable to create partitioned group", "partition_group_id", partitionedGroupInfo.PartitionedGroupID, "partition_id", partitionID)
+				level.Error(g.logger).Log("msg", "unable to create partitioned group", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID)
 			}
 			if isVisited, err := g.isGroupVisited(partitionedGroup.blocks, partitionID, g.ringLifecyclerID); err != nil {
-				level.Warn(g.logger).Log("msg", fmt.Sprintf("unable to check if blocks in partition %d are visited", partitionID), "group hash", groupHash, "err", err, "group", group.String())
+				level.Warn(g.logger).Log("msg", "unable to check if blocks in partition are visited", "group hash", groupHash, "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "err", err, "group", group.String())
 				continue
 			} else if isVisited {
-				level.Info(g.logger).Log("msg", fmt.Sprintf("skipping group because at least one block in partition %d is visited", partitionID), "group_hash", groupHash)
+				level.Info(g.logger).Log("msg", "skipping group because at least one block in partition is visited", "group_hash", groupHash, "partitioned_group_id", partitionedGroupID, "partition_id", partitionID)
 				continue
 			}
 
 			remainingCompactions++
 			partitionedGroupKey := createGroupKeyWithPartitionID(groupHash, partitionID, *partitionedGroup)
 
-			level.Info(g.logger).Log("msg", "found compactable group for user", "group_hash", groupHash, "group", partitionedGroup.String(), "partition_id", partitionID)
+			level.Info(g.logger).Log("msg", "found compactable group for user", "group_hash", groupHash, "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "partition_count", partitionCount, "group", partitionedGroup.String())
 			blockVisitMarker := BlockVisitMarker{
 				VisitTime:          time.Now().Unix(),
 				CompactorID:        g.ringLifecyclerID,
 				Status:             Pending,
-				PartitionedGroupID: partitionedGroupInfo.PartitionedGroupID,
+				PartitionedGroupID: partitionedGroupID,
 				PartitionID:        partitionID,
 				Version:            VisitMarkerVersion1,
 			}
@@ -254,7 +261,7 @@ mainLoop:
 			resolution := partitionedGroup.blocks[0].Thanos.Downsample.Resolution
 			externalLabels := labels.FromMap(partitionedGroup.blocks[0].Thanos.Labels)
 			thanosGroup, err := compact.NewGroup(
-				log.With(g.logger, "groupKey", partitionedGroupKey, "rangeStart", partitionedGroup.rangeStartTime().String(), "rangeEnd", partitionedGroup.rangeEndTime().String(), "externalLabels", externalLabels, "downsampleResolution", resolution),
+				log.With(g.logger, "groupKey", partitionedGroupKey, "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "partition_count", partitionCount, "rangeStart", partitionedGroup.rangeStartTime().String(), "rangeEnd", partitionedGroup.rangeEndTime().String(), "externalLabels", externalLabels, "downsampleResolution", resolution),
 				g.bkt,
 				partitionedGroupKey,
 				externalLabels,
@@ -274,15 +281,15 @@ mainLoop:
 				g.blocksFetchConcurrency,
 			)
 			if err != nil {
-				level.Debug(g.logger).Log("msg", "failed to create partitioned group", "blocks", partition.Blocks, "partition_count", partitionCount, "partition_id", partitionID)
+				level.Error(g.logger).Log("msg", "failed to create partitioned group", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "partition_count", partitionCount, "blocks", partition.Blocks)
 			}
 
 			for _, m := range partitionedGroup.blocks {
 				if err := thanosGroup.AppendMeta(m); err != nil {
-					level.Debug(g.logger).Log("msg", "failed to add block to partitioned group", "block", m.ULID, "partition_count", partitionCount, "partition_id", partitionID)
+					level.Error(g.logger).Log("msg", "failed to add block to partitioned group", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "partition_count", partitionCount, "block", m.ULID)
 				}
 			}
-			thanosGroup.SetPartitionInfo(partitionCount, partitionID)
+			thanosGroup.SetPartitionInfo(partitionedGroupID, partitionCount, partitionID)
 
 			outGroups = append(outGroups, thanosGroup)
 			if len(outGroups) >= g.compactionConcurrency {
@@ -422,14 +429,18 @@ func (g *ShuffleShardingGrouper) isGroupVisited(blocks []*metadata.Meta, partiti
 		blockVisitMarker, err := ReadBlockVisitMarker(g.ctx, g.bkt, g.logger, blockID, partitionID, g.blockVisitMarkerReadFailed)
 		if err != nil {
 			if errors.Is(err, ErrorBlockVisitMarkerNotFound) {
-				level.Debug(g.logger).Log("msg", "no visit marker file for block", "blockID", blockID, "partitionID", partitionID)
+				level.Warn(g.logger).Log("msg", "no visit marker file for block", "partition_id", partitionID, "block_id", blockID)
 				continue
 			}
-			level.Error(g.logger).Log("msg", "unable to read block visit marker file", "blockID", blockID, "partitionID", partitionID, "err", err)
+			level.Error(g.logger).Log("msg", "unable to read block visit marker file", "partition_id", partitionID, "block_id", blockID, "err", err)
 			return true, err
 		}
+		if blockVisitMarker.isCompleted() {
+			level.Info(g.logger).Log("msg", "block visit marker with partition ID is completed", "partition_id", partitionID, "block_id", blockID)
+			return true, nil
+		}
 		if compactorID != blockVisitMarker.CompactorID && blockVisitMarker.isVisited(g.blockVisitMarkerTimeout, partitionID) {
-			level.Debug(g.logger).Log("msg", fmt.Sprintf("visited block: %s with partition ID: %d", blockID, partitionID))
+			level.Info(g.logger).Log("msg", "visited block with partition ID", "partition_id", partitionID, "block_id", blockID)
 			return true, nil
 		}
 	}
@@ -596,10 +607,10 @@ func groupBlocksByCompactableRanges(blocks []*metadata.Meta, ranges []int64) []b
 		}
 
 		// If the group covers the full range, it's fine.
-		if group.maxTime()-group.minTime() == group.rangeLength() {
-			idx++
-			continue
-		}
+		//if group.maxTime()-group.minTime() == group.rangeLength() {
+		//	idx++
+		//	continue
+		//}
 
 		// If the group's maxTime is after 1 block range, we can compact assuming that
 		// all the required blocks have already been uploaded.

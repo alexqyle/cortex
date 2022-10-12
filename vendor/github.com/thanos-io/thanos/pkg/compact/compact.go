@@ -350,6 +350,7 @@ type Group struct {
 	hashFunc                      metadata.HashFunc
 	blockFilesConcurrency         int
 	compactBlocksFetchConcurrency int
+	partitionedGroupID            uint32
 	partitionCount                int
 	partitionID                   int
 
@@ -493,6 +494,10 @@ func (cg *Group) Resolution() int64 {
 	return cg.resolution
 }
 
+func (cg *Group) PartitionedGroupID() uint32 {
+	return cg.partitionedGroupID
+}
+
 func (cg *Group) PartitionCount() int {
 	return cg.partitionCount
 }
@@ -501,7 +506,8 @@ func (cg *Group) PartitionID() int {
 	return cg.partitionID
 }
 
-func (cg *Group) SetPartitionInfo(partitionCount int, partitionID int) {
+func (cg *Group) SetPartitionInfo(partitionedGroupID uint32, partitionCount int, partitionID int) {
+	cg.partitionedGroupID = partitionedGroupID
 	cg.partitionCount = partitionCount
 	cg.partitionID = partitionID
 }
@@ -748,6 +754,17 @@ type Planner interface {
 	PlanWithPartition(ctx context.Context, metasByMinTime []*metadata.Meta, partitionID int, errChan chan error) ([]*metadata.Meta, error)
 }
 
+type ExtraCompactionCompleteChecker interface {
+	IsComplete(group *Group, blockID ulid.ULID) bool
+}
+
+type DefaultCompactionCompleteChecker struct {
+}
+
+func (c DefaultCompactionCompleteChecker) IsComplete(_ *Group, _ ulid.ULID) bool {
+	return true
+}
+
 // Compactor provides compaction against an underlying storage of time series data.
 // This is similar to tsdb.Compactor just without Plan method.
 // TODO(bwplotka): Split the Planner from Compactor on upstream as well, so we can import it.
@@ -771,7 +788,7 @@ type Compactor interface {
 
 // Compact plans and runs a single compaction against the group. The compacted result
 // is uploaded into the bucket the blocks were retrieved from.
-func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp Compactor) (shouldRerun bool, compID ulid.ULID, rerr error) {
+func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp Compactor, completeChecker ExtraCompactionCompleteChecker) (shouldRerun bool, compID ulid.ULID, rerr error) {
 	cg.compactionRunsStarted.Inc()
 
 	subDir := filepath.Join(dir, cg.Key())
@@ -791,15 +808,20 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 		return false, ulid.ULID{}, errors.Wrap(err, "create compaction group dir")
 	}
 
-	err := tracing.DoInSpanWithErr(ctx, "compaction_group", func(ctx context.Context) (err error) {
-		errChan := make(chan error)
-		shouldRerun, compID, err = cg.compact(ctx, subDir, planner, comp, errChan)
-		errChan <- err
+	currentCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errChan := make(chan error)
+	err := tracing.DoInSpanWithErr(currentCtx, "compaction_group", func(ctx context.Context) (err error) {
+		shouldRerun, compID, err = cg.compact(ctx, subDir, planner, comp, completeChecker, errChan)
 		return err
 	}, opentracing.Tags{"group.key": cg.Key()})
 	if err != nil {
+		errChan <- err
 		cg.compactionFailures.Inc()
 		return false, ulid.ULID{}, err
+	} else {
+		// Explicitly trigger cancel before return to make sure ctx Done handler could kick in earlier
+		cancel()
 	}
 	cg.compactionRunsCompleted.Inc()
 	return shouldRerun, compID, nil
@@ -996,7 +1018,7 @@ func RepairIssue347(ctx context.Context, logger log.Logger, bkt objstore.Bucket,
 	return nil
 }
 
-func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp Compactor, errChan chan error) (shouldRerun bool, compID ulid.ULID, _ error) {
+func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp Compactor, completeChecker ExtraCompactionCompleteChecker, errChan chan error) (shouldRerun bool, compID ulid.ULID, _ error) {
 	cg.mtx.Lock()
 	defer cg.mtx.Unlock()
 
@@ -1109,7 +1131,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 		level.Info(cg.logger).Log("msg", "compacted block would have no samples, deleting source blocks", "blocks", sourceBlockStr)
 		for _, meta := range toCompact {
 			if meta.Stats.NumSamples == 0 {
-				if err := cg.deleteBlock(meta.ULID, filepath.Join(dir, meta.ULID.String())); err != nil {
+				if err := cg.deleteBlock(meta.ULID, filepath.Join(dir, meta.ULID.String()), completeChecker); err != nil {
 					level.Warn(cg.logger).Log("msg", "failed to mark for deletion an empty block found during compaction", "block", meta.ULID)
 				}
 			}
@@ -1172,7 +1194,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 	// Eventually the block we just uploaded should get synced into the group again (including sync-delay).
 	for _, meta := range toCompact {
 		err = tracing.DoInSpanWithErr(ctx, "compaction_block_delete", func(ctx context.Context) error {
-			return cg.deleteBlock(meta.ULID, filepath.Join(dir, meta.ULID.String()))
+			return cg.deleteBlock(meta.ULID, filepath.Join(dir, meta.ULID.String()), completeChecker)
 		}, opentracing.Tags{"block.id": meta.ULID})
 		if err != nil {
 			return false, ulid.ULID{}, retry(errors.Wrapf(err, "mark old block for deletion from bucket"))
@@ -1185,17 +1207,19 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 	return true, compID, nil
 }
 
-func (cg *Group) deleteBlock(id ulid.ULID, bdir string) error {
+func (cg *Group) deleteBlock(id ulid.ULID, bdir string, completeChecker ExtraCompactionCompleteChecker) error {
 	if err := os.RemoveAll(bdir); err != nil {
 		return errors.Wrapf(err, "remove old block dir %s", id)
 	}
 
-	// Spawn a new context so we always mark a block for deletion in full on shutdown.
-	delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	level.Info(cg.logger).Log("msg", "marking compacted block for deletion", "old_block", id)
-	if err := block.MarkForDeletion(delCtx, cg.logger, cg.bkt, id, "source of compacted block", cg.blocksMarkedForDeletion); err != nil {
-		return errors.Wrapf(err, "mark block %s for deletion from bucket", id)
+	if completeChecker.IsComplete(cg, id) {
+		// Spawn a new context so we always mark a block for deletion in full on shutdown.
+		delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		level.Info(cg.logger).Log("msg", "marking compacted block for deletion", "old_block", id)
+		if err := block.MarkForDeletion(delCtx, cg.logger, cg.bkt, id, "source of compacted block", cg.blocksMarkedForDeletion); err != nil {
+			return errors.Wrapf(err, "mark block %s for deletion from bucket", id)
+		}
 	}
 	return nil
 }
@@ -1207,6 +1231,7 @@ type BucketCompactor struct {
 	grouper                        Grouper
 	comp                           Compactor
 	planner                        Planner
+	completeChecker                ExtraCompactionCompleteChecker
 	compactDir                     string
 	bkt                            objstore.Bucket
 	concurrency                    int
@@ -1228,12 +1253,42 @@ func NewBucketCompactor(
 	if concurrency <= 0 {
 		return nil, errors.Errorf("invalid concurrency level (%d), concurrency level must be > 0", concurrency)
 	}
+	return NewBucketCompactorWithCompleteChecker(
+		logger,
+		sy,
+		grouper,
+		planner,
+		comp,
+		DefaultCompactionCompleteChecker{},
+		compactDir,
+		bkt,
+		concurrency,
+		skipBlocksWithOutOfOrderChunks,
+	)
+}
+
+func NewBucketCompactorWithCompleteChecker(
+	logger log.Logger,
+	sy *Syncer,
+	grouper Grouper,
+	planner Planner,
+	comp Compactor,
+	completeChecker ExtraCompactionCompleteChecker,
+	compactDir string,
+	bkt objstore.Bucket,
+	concurrency int,
+	skipBlocksWithOutOfOrderChunks bool,
+) (*BucketCompactor, error) {
+	if concurrency <= 0 {
+		return nil, errors.Errorf("invalid concurrency level (%d), concurrency level must be > 0", concurrency)
+	}
 	return &BucketCompactor{
 		logger:                         logger,
 		sy:                             sy,
 		grouper:                        grouper,
 		planner:                        planner,
 		comp:                           comp,
+		completeChecker:                completeChecker,
 		compactDir:                     compactDir,
 		bkt:                            bkt,
 		concurrency:                    concurrency,
@@ -1274,7 +1329,7 @@ func (c *BucketCompactor) Compact(ctx context.Context) (rerr error) {
 			go func() {
 				defer wg.Done()
 				for g := range groupChan {
-					shouldRerunGroup, _, err := g.Compact(workCtx, c.compactDir, c.planner, c.comp)
+					shouldRerunGroup, _, err := g.Compact(workCtx, c.compactDir, c.planner, c.comp, c.completeChecker)
 					if err == nil {
 						if shouldRerunGroup {
 							mtx.Lock()

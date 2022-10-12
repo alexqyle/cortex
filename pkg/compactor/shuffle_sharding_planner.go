@@ -82,10 +82,13 @@ func (p *ShuffleShardingPlanner) PlanWithPartition(_ context.Context, metasByMin
 		if err != nil {
 			// shuffle_sharding_grouper should put visit marker file for blocks ready for
 			// compaction. So error should be returned if visit marker file does not exist.
-			return nil, fmt.Errorf("unable to get visit marker file for block %s: %s", blockID, err.Error())
+			return nil, fmt.Errorf("unable to get visit marker file for block %s with partition ID %d: %s", blockID, partitionID, err.Error())
+		}
+		if blockVisitMarker.isCompleted() {
+			return nil, fmt.Errorf("block %s with partition ID %d is in completed status", blockID, partitionID)
 		}
 		if !blockVisitMarker.isVisitedByCompactor(p.blockVisitMarkerTimeout, partitionID, p.ringLifecyclerID) {
-			return nil, fmt.Errorf("block %s is not visited by current compactor %s", blockID, p.ringLifecyclerID)
+			return nil, fmt.Errorf("block %s with partition ID %d is not visited by current compactor %s", blockID, partitionID, p.ringLifecyclerID)
 		}
 
 		partitionGroupID = blockVisitMarker.PartitionedGroupID
@@ -96,7 +99,7 @@ func (p *ShuffleShardingPlanner) PlanWithPartition(_ context.Context, metasByMin
 		return nil, nil
 	}
 
-	go markBlocksVisitedHeartBeat(p.ctx, p.bkt, p.logger, resultMetas, partitionGroupID, partitionID, p.ringLifecyclerID, p.blockVisitMarkerFileUpdateInterval, p.blockVisitMarkerWriteFailed)
+	go markBlocksVisitedHeartBeat(p.ctx, p.bkt, p.logger, resultMetas, partitionGroupID, partitionID, p.ringLifecyclerID, p.blockVisitMarkerFileUpdateInterval, p.blockVisitMarkerWriteFailed, errChan)
 
 	return resultMetas, nil
 }

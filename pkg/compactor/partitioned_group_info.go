@@ -10,6 +10,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/thanos-io/objstore"
 	"io"
 	"path"
@@ -19,6 +20,11 @@ import (
 const (
 	PartitionedGroupDirectory    = "partitioned-groups"
 	PartitionedGroupInfoVersion1 = 1
+)
+
+var (
+	ErrorPartitionedGroupInfoNotFound  = errors.New("partitioned group info not found")
+	ErrorUnmarshalPartitionedGroupInfo = errors.New("unmarshal partitioned group info JSON")
 )
 
 type PartitionInfo struct {
@@ -62,39 +68,44 @@ func getPartitionedGroupFile(partitionedGroupID uint32) string {
 	return path.Join(PartitionedGroupDirectory, fmt.Sprintf("%d.json", partitionedGroupID))
 }
 
-func ReadPartitionedGroupInfo(ctx context.Context, bkt objstore.InstrumentedBucketReader, logger log.Logger, partitionedGroupID uint32) (*PartitionedGroupInfo, error) {
+func ReadPartitionedGroupInfo(ctx context.Context, bkt objstore.InstrumentedBucketReader, logger log.Logger, partitionedGroupID uint32, partitionedGroupInfoReadFailed prometheus.Counter) (*PartitionedGroupInfo, error) {
 	partitionedGroupFile := getPartitionedGroupFile(partitionedGroupID)
 	partitionedGroupReader, err := bkt.ReaderWithExpectedErrs(bkt.IsObjNotFoundErr).Get(ctx, partitionedGroupFile)
 	if err != nil {
 		if bkt.IsObjNotFoundErr(err) {
-			return nil, errors.Wrapf(ErrorBlockVisitMarkerNotFound, "partitioned group file: %s", partitionedGroupReader)
+			return nil, errors.Wrapf(ErrorPartitionedGroupInfoNotFound, "partitioned group file: %s", partitionedGroupReader)
 		}
+		partitionedGroupInfoReadFailed.Inc()
 		return nil, errors.Wrapf(err, "get partitioned group file: %s", partitionedGroupReader)
 	}
 	defer runutil.CloseWithLogOnErr(logger, partitionedGroupReader, "close partitioned group reader")
 	p, err := io.ReadAll(partitionedGroupReader)
 	if err != nil {
+		partitionedGroupInfoReadFailed.Inc()
 		return nil, errors.Wrapf(err, "read partitioned group file: %s", partitionedGroupFile)
 	}
 	partitionedGroupInfo := PartitionedGroupInfo{}
 	if err = json.Unmarshal(p, &partitionedGroupInfo); err != nil {
-		return nil, errors.Wrapf(ErrorUnmarshalBlockVisitMarker, "partitioned group file: %s, error: %v", partitionedGroupFile, err.Error())
+		partitionedGroupInfoReadFailed.Inc()
+		return nil, errors.Wrapf(ErrorUnmarshalPartitionedGroupInfo, "partitioned group file: %s, error: %v", partitionedGroupFile, err.Error())
 	}
 	if partitionedGroupInfo.Version != VisitMarkerVersion1 {
+		partitionedGroupInfoReadFailed.Inc()
 		return nil, errors.Errorf("unexpected partitioned group file version %d, expected %d", partitionedGroupInfo.Version, VisitMarkerVersion1)
 	}
 	return &partitionedGroupInfo, nil
 }
 
-func UpdatePartitionedGroupInfo(ctx context.Context, bkt objstore.InstrumentedBucket, logger log.Logger, partitionedGroupInfo PartitionedGroupInfo) (*PartitionedGroupInfo, error) {
-	existingPartitionedGroup, err := ReadPartitionedGroupInfo(ctx, bkt, logger, partitionedGroupInfo.PartitionedGroupID)
+func UpdatePartitionedGroupInfo(ctx context.Context, bkt objstore.InstrumentedBucket, logger log.Logger, partitionedGroupInfo PartitionedGroupInfo, partitionedGroupInfoReadFailed prometheus.Counter, partitionedGroupInfoWriteFailed prometheus.Counter) (*PartitionedGroupInfo, error) {
+	existingPartitionedGroup, err := ReadPartitionedGroupInfo(ctx, bkt, logger, partitionedGroupInfo.PartitionedGroupID, partitionedGroupInfoReadFailed)
 	if existingPartitionedGroup != nil {
-		level.Warn(logger).Log("msg", "partitioned group info already exists", "partitionedGroupID", partitionedGroupInfo.PartitionedGroupID, "bucketPath", existingPartitionedGroup)
+		level.Warn(logger).Log("msg", "partitioned group info already exists", "partitioned_group_id", partitionedGroupInfo.PartitionedGroupID)
 		return existingPartitionedGroup, nil
 	}
 	partitionedGroupFile := getPartitionedGroupFile(partitionedGroupInfo.PartitionedGroupID)
 	partitionedGroupInfoContent, err := json.Marshal(partitionedGroupInfo)
 	if err != nil {
+		partitionedGroupInfoWriteFailed.Inc()
 		return nil, err
 	}
 	reader := bytes.NewReader(partitionedGroupInfoContent)
