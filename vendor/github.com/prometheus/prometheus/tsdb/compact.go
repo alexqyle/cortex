@@ -394,7 +394,7 @@ func CompactBlockMetas(uid ulid.ULID, blocks ...*BlockMeta) *BlockMeta {
 // Compact creates a new block in the compactor's directory from the blocks in the
 // provided directories.
 func (c *LeveledCompactor) Compact(dest string, dirs []string, open []*Block) (uid ulid.ULID, err error) {
-	return c.CompactWithPartition(dest, dirs, open, 1, 1)
+	return c.CompactWithPartition(dest, dirs, open, 1, 0)
 }
 
 func (c *LeveledCompactor) CompactWithPartition(dest string, dirs []string, open []*Block, partitionCount int, partitionId int) (uid ulid.ULID, err error) {
@@ -507,7 +507,7 @@ func (c *LeveledCompactor) Write(dest string, b BlockReader, mint, maxt int64, p
 		}
 	}
 
-	err := c.write(dest, meta, 1, 1, b)
+	err := c.write(dest, meta, 0, 1, b)
 	if err != nil {
 		return uid, err
 	}

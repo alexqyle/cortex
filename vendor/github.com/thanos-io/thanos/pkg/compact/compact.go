@@ -816,7 +816,14 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 		return err
 	}, opentracing.Tags{"group.key": cg.Key()})
 	if err != nil {
-		errChan <- err
+		isErrChanOpen := true
+		select {
+		case _, isErrChanOpen = <-errChan:
+		default:
+		}
+		if isErrChanOpen {
+			errChan <- err
+		}
 		cg.compactionFailures.Inc()
 		return false, ulid.ULID{}, err
 	} else {
@@ -1040,6 +1047,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 			toCompact, e = planner.PlanWithPartition(ctx, cg.metasByMinTime, cg.partitionID, errChan)
 			return e
 		} else {
+			close(errChan)
 			toCompact, e = planner.Plan(ctx, cg.metasByMinTime)
 			return e
 		}

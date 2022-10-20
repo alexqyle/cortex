@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"path"
+	cortex_testutil "github.com/cortexproject/cortex/pkg/storage/tsdb/testutil"
+	thanosblock "github.com/thanos-io/thanos/pkg/block"
 	"testing"
 	"time"
 
@@ -336,19 +337,15 @@ func TestShuffleShardingGrouper_Groups(t *testing.T) {
 				Name: "cortex_compactor_remaining_planned_compactions",
 				Help: "Total number of plans that remain to be compacted.",
 			})
-			blockVisitMarkerReadFailed := promauto.With(registerer).NewCounter(prometheus.CounterOpts{
-				Name: "cortex_compactor_block_visit_marker_read_failed",
-				Help: "Number of block visit marker file failed to be read.",
-			})
-			blockVisitMarkerWriteFailed := promauto.With(registerer).NewCounter(prometheus.CounterOpts{
-				Name: "cortex_compactor_block_visit_marker_write_failed",
-				Help: "Number of block visit marker file failed to be written.",
-			})
+			blockVisitMarkerReadFailed := prometheus.NewCounter(prometheus.CounterOpts{})
+			blockVisitMarkerWriteFailed := prometheus.NewCounter(prometheus.CounterOpts{})
+			partitionedGroupInfoReadFailed := prometheus.NewCounter(prometheus.CounterOpts{})
+			partitionedGroupInfoWriteFailed := prometheus.NewCounter(prometheus.CounterOpts{})
 
 			bkt := &bucket.ClientMock{}
 			blockVisitMarkerTimeout := 5 * time.Minute
 			for _, visitedBlock := range testData.visitedBlocks {
-				visitMarkerFile := path.Join(visitedBlock.id.String(), BlockVisitMarkerFile)
+				visitMarkerFile := getBlockVisitMarkerFile(visitedBlock.id.String(), 0)
 				expireTime := time.Now()
 				if visitedBlock.isExpired {
 					expireTime = expireTime.Add(-1 * blockVisitMarkerTimeout)
@@ -390,6 +387,8 @@ func TestShuffleShardingGrouper_Groups(t *testing.T) {
 				blockVisitMarkerTimeout,
 				blockVisitMarkerReadFailed,
 				blockVisitMarkerWriteFailed,
+				partitionedGroupInfoReadFailed,
+				partitionedGroupInfoWriteFailed,
 			)
 			actual, err := g.Groups(testData.blocks)
 			require.NoError(t, err)
@@ -720,6 +719,524 @@ func TestBlocksGroup_overlaps(t *testing.T) {
 	for _, tc := range tests {
 		assert.Equal(t, tc.expected, tc.first.overlaps(tc.second))
 		assert.Equal(t, tc.expected, tc.second.overlaps(tc.first))
+	}
+}
+
+func TestGroupPartitioning(t *testing.T) {
+	t0block1Ulid := ulid.MustNew(1, nil)
+	t0block2Ulid := ulid.MustNew(2, nil)
+	t0block3Ulid := ulid.MustNew(3, nil)
+	t1block1Ulid := ulid.MustNew(4, nil)
+	t1block2Ulid := ulid.MustNew(5, nil)
+	t2block1Ulid := ulid.MustNew(6, nil)
+	t2block2Ulid := ulid.MustNew(7, nil)
+	t2block3Ulid := ulid.MustNew(8, nil)
+	t2block4Ulid := ulid.MustNew(9, nil)
+	t3block1Ulid := ulid.MustNew(10, nil)
+	t3block2Ulid := ulid.MustNew(11, nil)
+	t3block3Ulid := ulid.MustNew(12, nil)
+	t3block4Ulid := ulid.MustNew(13, nil)
+	t3block5Ulid := ulid.MustNew(14, nil)
+	t3block6Ulid := ulid.MustNew(15, nil)
+	t3block7Ulid := ulid.MustNew(16, nil)
+	t3block8Ulid := ulid.MustNew(17, nil)
+	t4block1Ulid := ulid.MustNew(18, nil)
+	t4block2Ulid := ulid.MustNew(19, nil)
+
+	blocks :=
+		map[ulid.ULID]*metadata.Meta{
+			t0block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t0block1Ulid, MinTime: 1 * time.Hour.Milliseconds(), MaxTime: 3 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t0block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t0block2Ulid, MinTime: 1 * time.Hour.Milliseconds(), MaxTime: 3 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t0block3Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t0block3Ulid, MinTime: 1 * time.Hour.Milliseconds(), MaxTime: 3 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t1block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t1block1Ulid, MinTime: 3 * time.Hour.Milliseconds(), MaxTime: 5 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t1block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t1block2Ulid, MinTime: 3 * time.Hour.Milliseconds(), MaxTime: 5 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block1Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block2Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block3Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block3Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block4Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block4Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block1Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block2Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block3Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block3Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block4Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block4Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block5Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block5Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block6Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block6Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block7Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block7Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block8Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block8Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t4block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t4block1Ulid, MinTime: 9 * time.Hour.Milliseconds(), MaxTime: 15 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t4block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t4block2Ulid, MinTime: 15 * time.Hour.Milliseconds(), MaxTime: 21 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+		}
+
+	testCompactorID := "test-compactor"
+
+	tests := map[string]struct {
+		ranges      []time.Duration
+		rangeStart  int64
+		rangeEnd    int64
+		indexSize   int64
+		indexLimit  int64
+		seriesCount int64
+		seriesLimit int64
+		blocks      []*metadata.Meta
+		expected    struct {
+			partitionCount int
+			partitions     map[int][]ulid.ULID
+		}
+	}{
+		"test blocks generated by partition": {
+			ranges:     []time.Duration{2 * time.Hour, 6 * time.Hour},
+			rangeStart: 1 * time.Hour.Milliseconds(),
+			rangeEnd:   9 * time.Hour.Milliseconds(),
+			indexSize:  int64(14),
+			indexLimit: int64(64),
+			blocks: []*metadata.Meta{
+				blocks[t1block1Ulid], blocks[t1block2Ulid],
+				blocks[t2block1Ulid], blocks[t2block2Ulid], blocks[t2block3Ulid], blocks[t2block4Ulid],
+				blocks[t3block1Ulid], blocks[t3block2Ulid], blocks[t3block3Ulid], blocks[t3block4Ulid],
+				blocks[t3block5Ulid], blocks[t3block6Ulid], blocks[t3block7Ulid], blocks[t3block8Ulid]},
+			expected: struct {
+				partitionCount int
+				partitions     map[int][]ulid.ULID
+			}{
+				partitionCount: 4,
+				partitions: map[int][]ulid.ULID{
+					0: {t1block1Ulid, t2block1Ulid, t3block1Ulid, t3block5Ulid},
+					1: {t1block2Ulid, t2block2Ulid, t3block2Ulid, t3block6Ulid},
+					2: {t1block1Ulid, t2block3Ulid, t3block3Ulid, t3block7Ulid},
+					3: {t1block2Ulid, t2block4Ulid, t3block4Ulid, t3block8Ulid},
+				},
+			},
+		},
+		"test all level 1 blocks": {
+			ranges:     []time.Duration{2 * time.Hour, 6 * time.Hour},
+			rangeStart: 1 * time.Hour.Milliseconds(),
+			rangeEnd:   9 * time.Hour.Milliseconds(),
+			indexSize:  int64(30),
+			indexLimit: int64(64),
+			blocks: []*metadata.Meta{
+				blocks[t0block1Ulid], blocks[t0block2Ulid], blocks[t0block3Ulid],
+			},
+			expected: struct {
+				partitionCount int
+				partitions     map[int][]ulid.ULID
+			}{
+				partitionCount: 2,
+				partitions: map[int][]ulid.ULID{
+					0: {t0block1Ulid, t0block2Ulid, t0block3Ulid},
+					1: {t0block1Ulid, t0block2Ulid, t0block3Ulid},
+				},
+			},
+		},
+		"test high level blocks generated without partitioning": {
+			ranges:     []time.Duration{2 * time.Hour, 6 * time.Hour},
+			rangeStart: 1 * time.Hour.Milliseconds(),
+			rangeEnd:   9 * time.Hour.Milliseconds(),
+			indexSize:  int64(50),
+			indexLimit: int64(64),
+			blocks: []*metadata.Meta{
+				blocks[t4block1Ulid], blocks[t4block2Ulid],
+			},
+			expected: struct {
+				partitionCount int
+				partitions     map[int][]ulid.ULID
+			}{
+				partitionCount: 2,
+				partitions: map[int][]ulid.ULID{
+					0: {t4block1Ulid, t4block2Ulid},
+					1: {t4block1Ulid, t4block2Ulid},
+				},
+			},
+		},
+		"test blocks generated by partition with series limit": {
+			ranges:      []time.Duration{2 * time.Hour, 6 * time.Hour},
+			rangeStart:  1 * time.Hour.Milliseconds(),
+			rangeEnd:    9 * time.Hour.Milliseconds(),
+			seriesCount: int64(14),
+			seriesLimit: int64(64),
+			blocks: []*metadata.Meta{
+				blocks[t1block1Ulid], blocks[t1block2Ulid],
+				blocks[t2block1Ulid], blocks[t2block2Ulid], blocks[t2block3Ulid], blocks[t2block4Ulid],
+				blocks[t3block1Ulid], blocks[t3block2Ulid], blocks[t3block3Ulid], blocks[t3block4Ulid],
+				blocks[t3block5Ulid], blocks[t3block6Ulid], blocks[t3block7Ulid], blocks[t3block8Ulid]},
+			expected: struct {
+				partitionCount int
+				partitions     map[int][]ulid.ULID
+			}{
+				partitionCount: 4,
+				partitions: map[int][]ulid.ULID{
+					0: {t1block1Ulid, t2block1Ulid, t3block1Ulid, t3block5Ulid},
+					1: {t1block2Ulid, t2block2Ulid, t3block2Ulid, t3block6Ulid},
+					2: {t1block1Ulid, t2block3Ulid, t3block3Ulid, t3block7Ulid},
+					3: {t1block2Ulid, t2block4Ulid, t3block4Ulid, t3block8Ulid},
+				},
+			},
+		},
+		"test blocks generated by partition with both index and series limit set": {
+			ranges:      []time.Duration{2 * time.Hour, 6 * time.Hour},
+			rangeStart:  1 * time.Hour.Milliseconds(),
+			rangeEnd:    9 * time.Hour.Milliseconds(),
+			indexSize:   int64(1),
+			indexLimit:  int64(64),
+			seriesCount: int64(14),
+			seriesLimit: int64(64),
+			blocks: []*metadata.Meta{
+				blocks[t1block1Ulid], blocks[t1block2Ulid],
+				blocks[t2block1Ulid], blocks[t2block2Ulid], blocks[t2block3Ulid], blocks[t2block4Ulid],
+				blocks[t3block1Ulid], blocks[t3block2Ulid], blocks[t3block3Ulid], blocks[t3block4Ulid],
+				blocks[t3block5Ulid], blocks[t3block6Ulid], blocks[t3block7Ulid], blocks[t3block8Ulid]},
+			expected: struct {
+				partitionCount int
+				partitions     map[int][]ulid.ULID
+			}{
+				partitionCount: 4,
+				partitions: map[int][]ulid.ULID{
+					0: {t1block1Ulid, t2block1Ulid, t3block1Ulid, t3block5Ulid},
+					1: {t1block2Ulid, t2block2Ulid, t3block2Ulid, t3block6Ulid},
+					2: {t1block1Ulid, t2block3Ulid, t3block3Ulid, t3block7Ulid},
+					3: {t1block2Ulid, t2block4Ulid, t3block4Ulid, t3block8Ulid},
+				},
+			},
+		},
+		"test blocks generated by partition with partition number equals to 1": {
+			ranges:     []time.Duration{2 * time.Hour, 6 * time.Hour},
+			rangeStart: 1 * time.Hour.Milliseconds(),
+			rangeEnd:   9 * time.Hour.Milliseconds(),
+			blocks: []*metadata.Meta{
+				blocks[t1block1Ulid], blocks[t1block2Ulid],
+				blocks[t2block1Ulid], blocks[t2block2Ulid], blocks[t2block3Ulid], blocks[t2block4Ulid],
+				blocks[t3block1Ulid], blocks[t3block2Ulid], blocks[t3block3Ulid], blocks[t3block4Ulid],
+				blocks[t3block5Ulid], blocks[t3block6Ulid], blocks[t3block7Ulid], blocks[t3block8Ulid]},
+			expected: struct {
+				partitionCount int
+				partitions     map[int][]ulid.ULID
+			}{
+				partitionCount: 1,
+				partitions: map[int][]ulid.ULID{
+					0: {t1block1Ulid, t1block2Ulid, t2block1Ulid, t2block2Ulid, t2block3Ulid, t2block4Ulid, t3block1Ulid,
+						t3block2Ulid, t3block3Ulid, t3block4Ulid, t3block5Ulid, t3block6Ulid, t3block7Ulid, t3block8Ulid},
+				},
+			},
+		},
+	}
+
+	for testName, testData := range tests {
+		t.Run(testName, func(t *testing.T) {
+			compactorCfg := &Config{
+				BlockRanges:                    testData.ranges,
+				PartitionIndexSizeLimitInBytes: testData.indexLimit,
+				PartitionSeriesCountLimit:      testData.seriesLimit,
+			}
+
+			limits := &validation.Limits{}
+			overrides, err := validation.NewOverrides(*limits, nil)
+			require.NoError(t, err)
+
+			ring := &RingMock{}
+
+			bkt := &bucket.ClientMock{}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			g := NewShuffleShardingGrouper(
+				ctx,
+				nil,
+				objstore.WithNoopInstr(bkt),
+				false, // Do not accept malformed indexes
+				true,  // Enable vertical compaction
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				metadata.NoneFunc,
+				*compactorCfg,
+				ring,
+				"test-addr",
+				testCompactorID,
+				overrides,
+				"",
+				10,
+				3,
+				1,
+				5*time.Minute,
+				nil,
+				nil,
+				nil,
+				nil,
+			)
+			var testBlocks []*metadata.Meta
+			for _, block := range testData.blocks {
+				block.Thanos.Files = []metadata.File{
+					{RelPath: thanosblock.IndexFilename, SizeBytes: testData.indexSize},
+				}
+				block.Stats.NumSeries = uint64(testData.seriesCount)
+				testBlocks = append(testBlocks, block)
+			}
+			testGroup := blocksGroup{
+				rangeStart: testData.rangeStart,
+				rangeEnd:   testData.rangeEnd,
+				blocks:     testBlocks,
+			}
+			actual := g.partitionBlockGroup(testGroup, uint32(0))
+			require.NoError(t, err)
+			require.Equal(t, testData.expected.partitionCount, actual.PartitionCount)
+			require.Len(t, actual.Partitions, len(testData.expected.partitions))
+			for _, actualPartition := range actual.Partitions {
+				actualPartitionID := actualPartition.PartitionID
+				require.ElementsMatch(t, testData.expected.partitions[actualPartitionID], actualPartition.Blocks)
+			}
+		})
+	}
+}
+
+func TestPartitionStrategyChange_shouldUseOriginalPartitionedGroup(t *testing.T) {
+	t1block1Ulid := ulid.MustNew(4, nil)
+	t1block2Ulid := ulid.MustNew(5, nil)
+	t2block1Ulid := ulid.MustNew(6, nil)
+	t2block2Ulid := ulid.MustNew(7, nil)
+	t2block3Ulid := ulid.MustNew(8, nil)
+	t2block4Ulid := ulid.MustNew(9, nil)
+	t3block1Ulid := ulid.MustNew(10, nil)
+	t3block2Ulid := ulid.MustNew(11, nil)
+	t3block3Ulid := ulid.MustNew(12, nil)
+	t3block4Ulid := ulid.MustNew(13, nil)
+	t3block5Ulid := ulid.MustNew(14, nil)
+	t3block6Ulid := ulid.MustNew(15, nil)
+	t3block7Ulid := ulid.MustNew(16, nil)
+	t3block8Ulid := ulid.MustNew(17, nil)
+
+	blocks :=
+		map[ulid.ULID]*metadata.Meta{
+			t1block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t1block1Ulid, MinTime: 3 * time.Hour.Milliseconds(), MaxTime: 5 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t1block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t1block2Ulid, MinTime: 3 * time.Hour.Milliseconds(), MaxTime: 5 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block1Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block2Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block3Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block3Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t2block4Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t2block4Ulid, MinTime: 5 * time.Hour.Milliseconds(), MaxTime: 7 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block1Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block1Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block2Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block2Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block3Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block3Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block4Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block4Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block5Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block5Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block6Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block6Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block7Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block7Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+			t3block8Ulid: {
+				BlockMeta: tsdb.BlockMeta{ULID: t3block8Ulid, MinTime: 7 * time.Hour.Milliseconds(), MaxTime: 9 * time.Hour.Milliseconds()},
+				Thanos:    metadata.Thanos{Labels: map[string]string{"external": "1"}},
+			},
+		}
+
+	partitionedGroupID := uint32(12345)
+	indexSize := int64(10)
+	seriesCount := int64(10)
+	testRanges := []time.Duration{2 * time.Hour, 6 * time.Hour}
+	testRangeStart := 1 * time.Hour.Milliseconds()
+	testRangeEnd := 9 * time.Hour.Milliseconds()
+	testBlocks := []*metadata.Meta{
+		blocks[t1block1Ulid], blocks[t1block2Ulid],
+		blocks[t2block1Ulid], blocks[t2block2Ulid], blocks[t2block3Ulid], blocks[t2block4Ulid],
+		blocks[t3block1Ulid], blocks[t3block2Ulid], blocks[t3block3Ulid], blocks[t3block4Ulid],
+		blocks[t3block5Ulid], blocks[t3block6Ulid], blocks[t3block7Ulid], blocks[t3block8Ulid],
+	}
+	var updatedTestBlocks []*metadata.Meta
+	for _, block := range testBlocks {
+		block.Thanos.Files = []metadata.File{
+			{RelPath: thanosblock.IndexFilename, SizeBytes: indexSize},
+		}
+		block.Stats.NumSeries = uint64(seriesCount)
+		updatedTestBlocks = append(updatedTestBlocks, block)
+	}
+	testGroup := blocksGroup{
+		rangeStart: testRangeStart,
+		rangeEnd:   testRangeEnd,
+		blocks:     updatedTestBlocks,
+	}
+	bkt, _ := cortex_testutil.PrepareFilesystemBucket(t)
+	createGrouper := func(bkt objstore.Bucket, compactorCfg *Config) *ShuffleShardingGrouper {
+		limits := &validation.Limits{}
+		overrides, err := validation.NewOverrides(*limits, nil)
+		require.NoError(t, err)
+
+		ring := &RingMock{}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		return NewShuffleShardingGrouper(
+			ctx,
+			nil,
+			objstore.WithNoopInstr(bkt),
+			false, // Do not accept malformed indexes
+			true,  // Enable vertical compaction
+			nil,
+			nil,
+			nil,
+			nil,
+			nil,
+			metadata.NoneFunc,
+			*compactorCfg,
+			ring,
+			"test-addr",
+			"test-compactor",
+			overrides,
+			"",
+			10,
+			3,
+			1,
+			5*time.Minute,
+			nil,
+			nil,
+			nil,
+			nil,
+		)
+	}
+
+	expectedPartitions := map[int][]ulid.ULID{
+		0: {t1block1Ulid, t2block1Ulid, t3block1Ulid, t3block5Ulid},
+		1: {t1block2Ulid, t2block2Ulid, t3block2Ulid, t3block6Ulid},
+		2: {t1block1Ulid, t2block3Ulid, t3block3Ulid, t3block7Ulid},
+		3: {t1block2Ulid, t2block4Ulid, t3block4Ulid, t3block8Ulid},
+	}
+
+	// test base case
+	compactorCfg1 := &Config{
+		BlockRanges:                    testRanges,
+		PartitionIndexSizeLimitInBytes: int64(40),
+	}
+	grouper1 := createGrouper(bkt, compactorCfg1)
+	partitionedGroup1, err := grouper1.generatePartitionBlockGroup(testGroup, partitionedGroupID)
+	require.NoError(t, err)
+	require.Equal(t, 4, partitionedGroup1.PartitionCount)
+	require.Len(t, partitionedGroup1.Partitions, 4)
+	partitionMap := make(map[int][]ulid.ULID)
+	for _, partition := range partitionedGroup1.Partitions {
+		partitionID := partition.PartitionID
+		require.ElementsMatch(t, expectedPartitions[partitionID], partition.Blocks)
+		partitionMap[partitionID] = partition.Blocks
+	}
+
+	// test limit increased
+	compactorCfg2 := &Config{
+		BlockRanges:                    testRanges,
+		PartitionIndexSizeLimitInBytes: int64(80),
+	}
+	grouper2 := createGrouper(bkt, compactorCfg2)
+	partitionedGroup2, err := grouper2.generatePartitionBlockGroup(testGroup, partitionedGroupID)
+	require.NoError(t, err)
+	require.Equal(t, partitionedGroup1.PartitionCount, partitionedGroup2.PartitionCount)
+	require.Len(t, partitionedGroup2.Partitions, len(partitionedGroup1.Partitions))
+	for _, partition := range partitionedGroup2.Partitions {
+		partitionID := partition.PartitionID
+		require.ElementsMatch(t, partitionMap[partitionID], partition.Blocks)
+	}
+
+	// test limit decreased
+	compactorCfg3 := &Config{
+		BlockRanges:                    testRanges,
+		PartitionIndexSizeLimitInBytes: int64(20),
+	}
+	grouper3 := createGrouper(bkt, compactorCfg3)
+	partitionedGroup3, err := grouper3.generatePartitionBlockGroup(testGroup, partitionedGroupID)
+	require.NoError(t, err)
+	require.Equal(t, partitionedGroup1.PartitionCount, partitionedGroup3.PartitionCount)
+	require.Len(t, partitionedGroup3.Partitions, len(partitionedGroup1.Partitions))
+	for _, partition := range partitionedGroup3.Partitions {
+		partitionID := partition.PartitionID
+		require.ElementsMatch(t, partitionMap[partitionID], partition.Blocks)
 	}
 }
 

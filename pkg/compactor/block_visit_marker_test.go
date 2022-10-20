@@ -22,6 +22,7 @@ func TestMarkBlocksVisited(t *testing.T) {
 	ulid2 := ulid.MustNew(2, nil)
 	now := time.Now().Unix()
 	nowBefore1h := time.Now().Add(-1 * time.Hour).Unix()
+	partitionedGroupID := uint32(12345)
 	for _, tcase := range []struct {
 		name        string
 		visitMarker BlockVisitMarker
@@ -30,9 +31,12 @@ func TestMarkBlocksVisited(t *testing.T) {
 		{
 			name: "write visit marker succeeded",
 			visitMarker: BlockVisitMarker{
-				CompactorID: "foo",
-				VisitTime:   now,
-				Version:     VisitMarkerVersion1,
+				CompactorID:        "foo",
+				Status:             Pending,
+				PartitionedGroupID: partitionedGroupID,
+				PartitionID:        0,
+				VisitTime:          now,
+				Version:            VisitMarkerVersion1,
 			},
 			blocks: []*metadata.Meta{
 				{
@@ -55,9 +59,12 @@ func TestMarkBlocksVisited(t *testing.T) {
 		{
 			name: "write visit marker succeeded 2",
 			visitMarker: BlockVisitMarker{
-				CompactorID: "bar",
-				VisitTime:   nowBefore1h,
-				Version:     VisitMarkerVersion1,
+				CompactorID:        "bar",
+				Status:             Completed,
+				PartitionedGroupID: partitionedGroupID,
+				PartitionID:        1,
+				VisitTime:          nowBefore1h,
+				Version:            VisitMarkerVersion1,
 			},
 			blocks: []*metadata.Meta{
 				{
@@ -85,9 +92,25 @@ func TestMarkBlocksVisited(t *testing.T) {
 			logger := log.NewNopLogger()
 			markBlocksVisited(ctx, bkt, logger, tcase.blocks, tcase.visitMarker, dummyCounter)
 			for _, meta := range tcase.blocks {
-				res, err := ReadBlockVisitMarker(ctx, objstore.WithNoopInstr(bkt), logger, meta.ULID.String(), dummyCounter)
+				res, err := ReadBlockVisitMarker(ctx, objstore.WithNoopInstr(bkt), logger, meta.ULID.String(), tcase.visitMarker.PartitionID, dummyCounter)
 				require.NoError(t, err)
 				require.Equal(t, tcase.visitMarker, *res)
+			}
+		})
+		t.Run(tcase.name, func(t *testing.T) {
+			ctx := context.Background()
+			dummyCounter := prometheus.NewCounter(prometheus.CounterOpts{})
+			bkt, _ := cortex_testutil.PrepareFilesystemBucket(t)
+			logger := log.NewNopLogger()
+			markBlocksVisitMarkerCompleted(ctx, bkt, logger, tcase.blocks, tcase.visitMarker.PartitionedGroupID, tcase.visitMarker.PartitionID, tcase.visitMarker.CompactorID, dummyCounter)
+			for _, meta := range tcase.blocks {
+				res, err := ReadBlockVisitMarker(ctx, objstore.WithNoopInstr(bkt), logger, meta.ULID.String(), tcase.visitMarker.PartitionID, dummyCounter)
+				require.NoError(t, err)
+				require.True(t, res.isCompleted())
+				require.Equal(t, tcase.visitMarker.CompactorID, res.CompactorID)
+				require.Equal(t, tcase.visitMarker.PartitionedGroupID, res.PartitionedGroupID)
+				require.Equal(t, tcase.visitMarker.PartitionID, res.PartitionID)
+				require.Equal(t, tcase.visitMarker.Version, res.Version)
 			}
 		})
 	}

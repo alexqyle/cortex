@@ -220,19 +220,18 @@ mainLoop:
 
 		groupHash := hashGroup(g.userID, group.rangeStart, group.rangeEnd)
 
-		partitionedGroupInfo := g.partitionBlockGroup(group, groupHash)
-		updatedPartitionedGroupInfo, err := UpdatePartitionedGroupInfo(g.ctx, g.bkt, g.logger, partitionedGroupInfo, g.partitionedGroupInfoReadFailed, g.partitionedGroupInfoWriteFailed)
+		partitionedGroupInfo, err := g.generatePartitionBlockGroup(group, groupHash)
 		if err != nil {
-			level.Warn(g.logger).Log("msg", "unable to update partitioned group info", "partitioned_group_id", partitionedGroupInfo.PartitionedGroupID, "err", err)
+			level.Warn(g.logger).Log("msg", "unable to update partitioned group info", "partitioned_group_id", groupHash, "err", err)
 			continue
 		}
-		level.Debug(g.logger).Log("msg", "generated partitioned groups", "groups", updatedPartitionedGroupInfo)
+		level.Debug(g.logger).Log("msg", "generated partitioned groups", "groups", partitionedGroupInfo)
 
-		partitionedGroupID := updatedPartitionedGroupInfo.PartitionedGroupID
-		partitionCount := updatedPartitionedGroupInfo.PartitionCount
-		for _, partition := range updatedPartitionedGroupInfo.Partitions {
+		partitionedGroupID := partitionedGroupInfo.PartitionedGroupID
+		partitionCount := partitionedGroupInfo.PartitionCount
+		for _, partition := range partitionedGroupInfo.Partitions {
 			partitionID := partition.PartitionID
-			partitionedGroup, err := createBlocksGroup(blocks, partition.Blocks, updatedPartitionedGroupInfo.RangeStart, updatedPartitionedGroupInfo.RangeEnd)
+			partitionedGroup, err := createBlocksGroup(blocks, partition.Blocks, partitionedGroupInfo.RangeStart, partitionedGroupInfo.RangeEnd)
 			if err != nil {
 				level.Error(g.logger).Log("msg", "unable to create partitioned group", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID)
 			}
@@ -301,6 +300,17 @@ mainLoop:
 	level.Info(g.logger).Log("msg", fmt.Sprintf("total groups for compaction: %d", len(outGroups)))
 
 	return outGroups, nil
+}
+
+func (g *ShuffleShardingGrouper) generatePartitionBlockGroup(group blocksGroup, groupHash uint32) (*PartitionedGroupInfo, error) {
+	partitionedGroupInfo := g.partitionBlockGroup(group, groupHash)
+	updatedPartitionedGroupInfo, err := UpdatePartitionedGroupInfo(g.ctx, g.bkt, g.logger, partitionedGroupInfo, g.partitionedGroupInfoReadFailed, g.partitionedGroupInfoWriteFailed)
+	if err != nil {
+		level.Warn(g.logger).Log("msg", "unable to update partitioned group info", "partitioned_group_id", partitionedGroupInfo.PartitionedGroupID, "err", err)
+		return nil, err
+	}
+	level.Debug(g.logger).Log("msg", "generated partitioned groups", "groups", updatedPartitionedGroupInfo)
+	return updatedPartitionedGroupInfo, nil
 }
 
 func (g *ShuffleShardingGrouper) partitionBlockGroup(group blocksGroup, groupHash uint32) PartitionedGroupInfo {
