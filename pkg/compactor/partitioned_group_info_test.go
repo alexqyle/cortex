@@ -30,7 +30,7 @@ func TestPartitionedGroupInfo(t *testing.T) {
 			partitionedGroupInfo: PartitionedGroupInfo{
 				PartitionedGroupID: partitionedGroupID,
 				PartitionCount:     2,
-				Partitions: []PartitionInfo{
+				Partitions: []Partition{
 					{
 						PartitionID: 0,
 						Blocks: []ulid.ULID{
@@ -56,7 +56,7 @@ func TestPartitionedGroupInfo(t *testing.T) {
 			partitionedGroupInfo: PartitionedGroupInfo{
 				PartitionedGroupID: partitionedGroupID,
 				PartitionCount:     3,
-				Partitions: []PartitionInfo{
+				Partitions: []Partition{
 					{
 						PartitionID: 0,
 						Blocks: []ulid.ULID{
@@ -107,7 +107,7 @@ func TestGetPartitionIDsByBlock(t *testing.T) {
 	partitionedGroupInfo := PartitionedGroupInfo{
 		PartitionedGroupID: uint32(12345),
 		PartitionCount:     3,
-		Partitions: []PartitionInfo{
+		Partitions: []Partition{
 			{
 				PartitionID: 0,
 				Blocks: []ulid.ULID{

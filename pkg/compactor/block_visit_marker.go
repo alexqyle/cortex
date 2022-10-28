@@ -133,7 +133,7 @@ func markBlocksVisited(
 		}
 		reader.Reset(visitMarkerFileContent)
 	}
-	level.Info(logger).Log("msg", "marked block visited", "partition_id", marker.PartitionID, "blocks", generateBlocksInfo(blocks))
+	level.Debug(logger).Log("msg", "marked block visited", "partition_id", marker.PartitionID, "blocks", generateBlocksInfo(blocks))
 }
 
 func markBlocksVisitedHeartBeat(
@@ -172,8 +172,11 @@ heartBeat:
 		case <-ticker.C:
 			continue
 		case err := <-errChan:
-			compactionErr = err
-			level.Warn(logger).Log("msg", "stop visit marker heart beat due to error", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo, "err", err)
+			if err != nil {
+				// sometimes nil error got pushed to channel.
+				compactionErr = err
+				level.Warn(logger).Log("msg", "stop visit marker heart beat due to error", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo, "err", err)
+			}
 			break heartBeat
 		}
 	}

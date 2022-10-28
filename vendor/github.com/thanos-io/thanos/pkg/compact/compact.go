@@ -58,7 +58,7 @@ type Syncer struct {
 	blocks                   map[ulid.ULID]*metadata.Meta
 	partial                  map[ulid.ULID]error
 	metrics                  *syncerMetrics
-	duplicateBlocksFilter    *block.DeduplicateFilter
+	duplicateBlocksFilter    block.IDeduplicateFilter
 	ignoreDeletionMarkFilter *block.IgnoreDeletionMarkFilter
 }
 
@@ -95,7 +95,7 @@ func newSyncerMetrics(reg prometheus.Registerer, blocksMarkedForDeletion, garbag
 
 // NewMetaSyncer returns a new Syncer for the given Bucket and directory.
 // Blocks must be at least as old as the sync delay for being considered.
-func NewMetaSyncer(logger log.Logger, reg prometheus.Registerer, bkt objstore.Bucket, fetcher block.MetadataFetcher, duplicateBlocksFilter *block.DeduplicateFilter, ignoreDeletionMarkFilter *block.IgnoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks prometheus.Counter) (*Syncer, error) {
+func NewMetaSyncer(logger log.Logger, reg prometheus.Registerer, bkt objstore.Bucket, fetcher block.MetadataFetcher, duplicateBlocksFilter block.IDeduplicateFilter, ignoreDeletionMarkFilter *block.IgnoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks prometheus.Counter) (*Syncer, error) {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -793,7 +793,14 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 
 	subDir := filepath.Join(dir, cg.Key())
 
+	currentCtx, cancel := context.WithCancel(ctx)
+	errChan := make(chan error)
+	isErrChanOpen := true
 	defer func() {
+		if isErrChanOpen {
+			close(errChan)
+		}
+		cancel()
 		// Leave the compact directory for inspection if it is a halt error
 		// or if it is not then so that possibly we would not have to download everything again.
 		if rerr != nil {
@@ -808,19 +815,15 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 		return false, ulid.ULID{}, errors.Wrap(err, "create compaction group dir")
 	}
 
-	currentCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errChan := make(chan error)
 	err := tracing.DoInSpanWithErr(currentCtx, "compaction_group", func(ctx context.Context) (err error) {
 		shouldRerun, compID, err = cg.compact(ctx, subDir, planner, comp, completeChecker, errChan)
 		return err
 	}, opentracing.Tags{"group.key": cg.Key()})
+	select {
+	case _, isErrChanOpen = <-errChan:
+	default:
+	}
 	if err != nil {
-		isErrChanOpen := true
-		select {
-		case _, isErrChanOpen = <-errChan:
-		default:
-		}
 		if isErrChanOpen {
 			errChan <- err
 		}
@@ -1063,7 +1066,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 
 	// Due to #183 we verify that none of the blocks in the plan have overlapping sources.
 	// This is one potential source of how we could end up with duplicated chunks.
-	uniqueSources := map[ulid.ULID]struct{}{}
+	//uniqueSources := map[ulid.ULID]struct{}{}
 
 	// Once we have a plan we need to download the actual data.
 	groupCompactionBegin := time.Now()
@@ -1074,12 +1077,12 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 	toCompactDirs := make([]string, 0, len(toCompact))
 	for _, m := range toCompact {
 		bdir := filepath.Join(dir, m.ULID.String())
-		for _, s := range m.Compaction.Sources {
-			if _, ok := uniqueSources[s]; ok {
-				return false, ulid.ULID{}, halt(errors.Errorf("overlapping sources detected for plan %v", toCompact))
-			}
-			uniqueSources[s] = struct{}{}
-		}
+		//for _, s := range m.Compaction.Sources {
+		//	if _, ok := uniqueSources[s]; ok {
+		//		return false, ulid.ULID{}, halt(errors.Errorf("overlapping sources detected for plan %v", toCompact))
+		//	}
+		//	uniqueSources[s] = struct{}{}
+		//}
 		func(ctx context.Context, meta *metadata.Meta) {
 			g.Go(func() error {
 				if err := tracing.DoInSpanWithErr(ctx, "compaction_block_download", func(ctx context.Context) error {
@@ -1166,6 +1169,16 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 	if err != nil {
 		return false, ulid.ULID{}, errors.Wrapf(err, "failed to finalize the block %s", bdir)
 	}
+
+	partitionInfo := block.PartitionInfo{
+		PartitionedGroupID: cg.partitionedGroupID,
+		PartitionCount: cg.partitionCount,
+		PartitionID: cg.partitionID,
+	}
+	if err := partitionInfo.WriteToDir(cg.logger, bdir); err != nil {
+		return false, ulid.ULID{}, errors.Wrapf(err, "failed to put partition info for the block %s", bdir)
+	}
+
 
 	if err = os.Remove(filepath.Join(bdir, "tombstones")); err != nil {
 		return false, ulid.ULID{}, errors.Wrap(err, "remove tombstones")

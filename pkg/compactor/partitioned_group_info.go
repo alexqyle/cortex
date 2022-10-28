@@ -27,17 +27,17 @@ var (
 	ErrorUnmarshalPartitionedGroupInfo = errors.New("unmarshal partitioned group info JSON")
 )
 
-type PartitionInfo struct {
+type Partition struct {
 	PartitionID int         `json:"partitionID"`
 	Blocks      []ulid.ULID `json:"blocks"`
 }
 
 type PartitionedGroupInfo struct {
-	PartitionedGroupID uint32          `json:"partitionedGroupID"`
-	PartitionCount     int             `json:"partitionCount"`
-	Partitions         []PartitionInfo `json:"partitions"`
-	RangeStart         int64           `json:"rangeStart"`
-	RangeEnd           int64           `json:"rangeEnd"`
+	PartitionedGroupID uint32      `json:"partitionedGroupID"`
+	PartitionCount     int         `json:"partitionCount"`
+	Partitions         []Partition `json:"partitions"`
+	RangeStart         int64       `json:"rangeStart"`
+	RangeEnd           int64       `json:"rangeEnd"`
 	// Version of the file.
 	Version int `json:"version"`
 }
@@ -56,6 +56,22 @@ partitionLoop:
 	return partitionIDs
 }
 
+func (p *PartitionedGroupInfo) getAllBlocks() []ulid.ULID {
+	uniqueBlocks := make(map[ulid.ULID]struct{})
+	for _, partition := range p.Partitions {
+		for _, block := range partition.Blocks {
+			uniqueBlocks[block] = struct{}{}
+		}
+	}
+	blocks := make([]ulid.ULID, len(uniqueBlocks))
+	i := 0
+	for block, _ := range uniqueBlocks {
+		blocks[i] = block
+		i++
+	}
+	return blocks
+}
+
 func (p PartitionedGroupInfo) String() string {
 	var partitions []string
 	for _, partition := range p.Partitions {
@@ -69,7 +85,10 @@ func getPartitionedGroupFile(partitionedGroupID uint32) string {
 }
 
 func ReadPartitionedGroupInfo(ctx context.Context, bkt objstore.InstrumentedBucketReader, logger log.Logger, partitionedGroupID uint32, partitionedGroupInfoReadFailed prometheus.Counter) (*PartitionedGroupInfo, error) {
-	partitionedGroupFile := getPartitionedGroupFile(partitionedGroupID)
+	return ReadPartitionedGroupInfoFile(ctx, bkt, logger, getPartitionedGroupFile(partitionedGroupID), partitionedGroupInfoReadFailed)
+}
+
+func ReadPartitionedGroupInfoFile(ctx context.Context, bkt objstore.InstrumentedBucketReader, logger log.Logger, partitionedGroupFile string, partitionedGroupInfoReadFailed prometheus.Counter) (*PartitionedGroupInfo, error) {
 	partitionedGroupReader, err := bkt.ReaderWithExpectedErrs(bkt.IsObjNotFoundErr).Get(ctx, partitionedGroupFile)
 	if err != nil {
 		if bkt.IsObjNotFoundErr(err) {

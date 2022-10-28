@@ -43,6 +43,11 @@ func (p *PartitionCompactionCompleteChecker) IsComplete(group *compact.Group, bl
 		level.Warn(p.logger).Log("msg", "unable to read partitioned group info", "partitioned_group_id", partitionedGroupID, "block_id", blockID, "err", err)
 		return false
 	}
+	return p.IsPartitionedBlockComplete(partitionedGroupInfo, currentPartitionID, blockID)
+}
+
+func (p *PartitionCompactionCompleteChecker) IsPartitionedBlockComplete(partitionedGroupInfo *PartitionedGroupInfo, currentPartitionID int, blockID ulid.ULID) bool {
+	partitionedGroupID := partitionedGroupInfo.PartitionedGroupID
 	for _, partitionID := range partitionedGroupInfo.getPartitionIDsByBlock(blockID) {
 		// Skip current partition ID since current one is completed
 		if partitionID != currentPartitionID {

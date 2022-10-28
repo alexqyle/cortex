@@ -39,7 +39,7 @@ func TestPartitionCompactionCompleteChecker(t *testing.T) {
 			partitionedGroupInfo: PartitionedGroupInfo{
 				PartitionedGroupID: partitionedGroupID,
 				PartitionCount:     2,
-				Partitions: []PartitionInfo{
+				Partitions: []Partition{
 					{
 						PartitionID: 0,
 						Blocks: []ulid.ULID{
@@ -117,7 +117,7 @@ func TestPartitionCompactionCompleteChecker(t *testing.T) {
 			partitionedGroupInfo: PartitionedGroupInfo{
 				PartitionedGroupID: partitionedGroupID,
 				PartitionCount:     3,
-				Partitions: []PartitionInfo{
+				Partitions: []Partition{
 					{
 						PartitionID: 0,
 						Blocks: []ulid.ULID{
@@ -191,7 +191,7 @@ func TestPartitionCompactionCompleteChecker(t *testing.T) {
 			partitionedGroupInfo: PartitionedGroupInfo{
 				PartitionedGroupID: partitionedGroupID,
 				PartitionCount:     3,
-				Partitions: []PartitionInfo{
+				Partitions: []Partition{
 					{
 						PartitionID: 0,
 						Blocks: []ulid.ULID{
@@ -274,7 +274,7 @@ func TestPartitionCompactionCompleteChecker(t *testing.T) {
 			partitionedGroupInfo: PartitionedGroupInfo{
 				PartitionedGroupID: partitionedGroupID,
 				PartitionCount:     3,
-				Partitions: []PartitionInfo{
+				Partitions: []Partition{
 					{
 						PartitionID: 0,
 						Blocks: []ulid.ULID{

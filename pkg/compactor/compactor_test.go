@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/compact"
 	"github.com/thanos-io/thanos/pkg/testutil"
@@ -476,6 +477,7 @@ func TestCompactor_ShouldIncrementCompactionErrorIfFailedToCompactASingleTenant(
 	bucketClient.MockUpload(userID+"/bucket-index.json.gz", nil)
 	bucketClient.MockGet(userID+"/partitioned-groups/"+partitionedGroupID+".json", "", nil)
 	bucketClient.MockUpload(userID+"/partitioned-groups/"+partitionedGroupID+".json", nil)
+	bucketClient.MockIter(userID+"/"+PartitionedGroupDirectory, nil, nil)
 
 	c, _, tsdbPlannerMock, _, registry := prepare(t, prepareConfig(), bucketClient, nil)
 	tsdbPlannerMock.On("Plan", mock.Anything, mock.Anything).Return([]*metadata.Meta{}, errors.New("Failed to plan"))
@@ -548,6 +550,8 @@ func TestCompactor_ShouldIterateOverUsersAndRunCompaction(t *testing.T) {
 	bucketClient.MockUpload("user-1/partitioned-groups/"+partitionedGroupID1+".json", nil)
 	bucketClient.MockGet("user-2/partitioned-groups/"+partitionedGroupID2+".json", "", nil)
 	bucketClient.MockUpload("user-2/partitioned-groups/"+partitionedGroupID2+".json", nil)
+	bucketClient.MockIter("user-1/"+PartitionedGroupDirectory, nil, nil)
+	bucketClient.MockIter("user-2/"+PartitionedGroupDirectory, nil, nil)
 
 	c, _, tsdbPlanner, logs, registry := prepare(t, prepareConfig(), bucketClient, nil)
 
@@ -685,6 +689,7 @@ func TestCompactor_ShouldNotCompactBlocksMarkedForDeletion(t *testing.T) {
 	bucketClient.MockDelete("user-1/01DTW0ZCPDDNV4BV83Q2SV4QAZ", nil)
 	bucketClient.MockGet("user-1/bucket-index.json.gz", "", nil)
 	bucketClient.MockUpload("user-1/bucket-index.json.gz", nil)
+	bucketClient.MockIter("user-1/"+PartitionedGroupDirectory, nil, nil)
 
 	c, _, tsdbPlanner, logs, registry := prepare(t, cfg, bucketClient, nil)
 
@@ -816,6 +821,8 @@ func TestCompactor_ShouldNotCompactBlocksMarkedForSkipCompact(t *testing.T) {
 	bucketClient.MockUpload("user-1/partitioned-groups/"+partitionedGroupID1+".json", nil)
 	bucketClient.MockGet("user-2/partitioned-groups/"+partitionedGroupID2+".json", "", nil)
 	bucketClient.MockUpload("user-2/partitioned-groups/"+partitionedGroupID2+".json", nil)
+	bucketClient.MockIter("user-1/"+PartitionedGroupDirectory, nil, nil)
+	bucketClient.MockIter("user-2/"+PartitionedGroupDirectory, nil, nil)
 
 	c, _, tsdbPlanner, _, registry := prepare(t, prepareConfig(), bucketClient, nil)
 
@@ -871,6 +878,7 @@ func TestCompactor_ShouldNotCompactBlocksForUsersMarkedForDeletion(t *testing.T)
 	bucketClient.MockDelete("user-1/bucket-index.json.gz", nil)
 	bucketClient.MockGet("user-1/partitioned-groups/"+partitionedGroupID1+".json", "", nil)
 	bucketClient.MockUpload("user-1/partitioned-groups/"+partitionedGroupID1+".json", nil)
+	bucketClient.MockIter("user-1/"+PartitionedGroupDirectory, nil, nil)
 
 	c, _, tsdbPlanner, logs, registry := prepare(t, cfg, bucketClient, nil)
 
@@ -1033,22 +1041,26 @@ func TestCompactor_ShouldCompactAllUsersOnShardingEnabledButOnlyOneInstanceRunni
 	bucketClient.MockGet("user-1/01DTVP434PA9VFXSW2JKB3392D/deletion-mark.json", "", nil)
 	bucketClient.MockGet("user-1/01DTVP434PA9VFXSW2JKB3392D/no-compact-mark.json", "", nil)
 	bucketClient.MockGet("user-1/01DTVP434PA9VFXSW2JKB3392D/partition-0-visit-mark.json", "", nil)
+	bucketClient.MockGet("user-1/01DTVP434PA9VFXSW2JKB3392D/"+block.PartitionInfoFilename, "", nil)
 	bucketClient.MockUpload("user-1/01DTVP434PA9VFXSW2JKB3392D/partition-0-visit-mark.json", nil)
 	bucketClient.MockGet("user-1/01FN6CDF3PNEWWRY5MPGJPE3EX/meta.json", mockBlockMetaJSON("01FN6CDF3PNEWWRY5MPGJPE3EX"), nil)
 	bucketClient.MockGet("user-1/01FN6CDF3PNEWWRY5MPGJPE3EX/deletion-mark.json", "", nil)
 	bucketClient.MockGet("user-1/01FN6CDF3PNEWWRY5MPGJPE3EX/no-compact-mark.json", "", nil)
 	bucketClient.MockGet("user-1/01FN6CDF3PNEWWRY5MPGJPE3EX/partition-0-visit-mark.json", "", nil)
+	bucketClient.MockGet("user-1/01FN6CDF3PNEWWRY5MPGJPE3EX/"+block.PartitionInfoFilename, "", nil)
 	bucketClient.MockUpload("user-1/01FN6CDF3PNEWWRY5MPGJPE3EX/partition-0-visit-mark.json", nil)
 	bucketClient.MockGet("user-2/01DTW0ZCPDDNV4BV83Q2SV4QAZ/meta.json", mockBlockMetaJSON("01DTW0ZCPDDNV4BV83Q2SV4QAZ"), nil)
 	bucketClient.MockGet("user-2/01DTW0ZCPDDNV4BV83Q2SV4QAZ/deletion-mark.json", "", nil)
 	bucketClient.MockGet("user-2/01DTW0ZCPDDNV4BV83Q2SV4QAZ/no-compact-mark.json", "", nil)
 	bucketClient.MockGet("user-2/01DTW0ZCPDDNV4BV83Q2SV4QAZ/partition-0-visit-mark.json", "", nil)
 	bucketClient.MockUpload("user-2/01DTW0ZCPDDNV4BV83Q2SV4QAZ/partition-0-visit-mark.json", nil)
+	bucketClient.MockGet("user-2/01DTW0ZCPDDNV4BV83Q2SV4QAZ/"+block.PartitionInfoFilename, "", nil)
 	bucketClient.MockGet("user-2/01FN3V83ABR9992RF8WRJZ76ZQ/meta.json", mockBlockMetaJSON("01FN3V83ABR9992RF8WRJZ76ZQ"), nil)
 	bucketClient.MockGet("user-2/01FN3V83ABR9992RF8WRJZ76ZQ/deletion-mark.json", "", nil)
 	bucketClient.MockGet("user-2/01FN3V83ABR9992RF8WRJZ76ZQ/no-compact-mark.json", "", nil)
 	bucketClient.MockGet("user-2/01FN3V83ABR9992RF8WRJZ76ZQ/partition-0-visit-mark.json", "", nil)
 	bucketClient.MockUpload("user-2/01FN3V83ABR9992RF8WRJZ76ZQ/partition-0-visit-mark.json", nil)
+	bucketClient.MockGet("user-2/01FN3V83ABR9992RF8WRJZ76ZQ/"+block.PartitionInfoFilename, "", nil)
 	bucketClient.MockGet("user-1/bucket-index.json.gz", "", nil)
 	bucketClient.MockGet("user-2/bucket-index.json.gz", "", nil)
 	bucketClient.MockUpload("user-1/bucket-index.json.gz", nil)
@@ -1057,6 +1069,8 @@ func TestCompactor_ShouldCompactAllUsersOnShardingEnabledButOnlyOneInstanceRunni
 	bucketClient.MockUpload("user-1/partitioned-groups/"+partitionedGroupID1+".json", nil)
 	bucketClient.MockGet("user-2/partitioned-groups/"+partitionedGroupID2+".json", "", nil)
 	bucketClient.MockUpload("user-2/partitioned-groups/"+partitionedGroupID2+".json", nil)
+	bucketClient.MockIter("user-1/"+PartitionedGroupDirectory, nil, nil)
+	bucketClient.MockIter("user-2/"+PartitionedGroupDirectory, nil, nil)
 
 	ringStore, closer := consul.NewInMemoryClient(ring.GetCodec(), log.NewNopLogger(), nil)
 	t.Cleanup(func() { assert.NoError(t, closer.Close()) })
@@ -1138,10 +1152,12 @@ func TestCompactor_ShouldCompactOnlyUsersOwnedByTheInstanceOnShardingEnabledAndM
 		bucketClient.MockGet(userID+"/01DTVP434PA9VFXSW2JKB3392D/no-compact-mark.json", "", nil)
 		bucketClient.MockGet(userID+"/01DTVP434PA9VFXSW2JKB3392D/partition-0-visit-mark.json", "", nil)
 		bucketClient.MockUpload(userID+"/01DTVP434PA9VFXSW2JKB3392D/partition-0-visit-mark.json", nil)
+		bucketClient.MockGet(userID+"/01DTW0ZCPDDNV4BV83Q2SV4QAZ/"+block.PartitionInfoFilename, "", nil)
 		bucketClient.MockGet(userID+"/bucket-index.json.gz", "", nil)
 		bucketClient.MockUpload(userID+"/bucket-index.json.gz", nil)
 		bucketClient.MockGet(userID+"/partitioned-groups/"+partitionedGroupID+".json", "", nil)
 		bucketClient.MockUpload(userID+"/partitioned-groups/"+partitionedGroupID+".json", nil)
+		bucketClient.MockIter(userID+"/"+PartitionedGroupDirectory, nil, nil)
 	}
 
 	// Create a shared KV Store
@@ -1254,6 +1270,7 @@ func TestCompactor_ShouldCompactOnlyShardsOwnedByTheInstanceOnShardingEnabledWit
 			bucketClient.MockGetTimes(userID+"/"+blockID+"/partition-0-visit-mark.json", "", nil, 1)
 			bucketClient.MockGet(userID+"/"+blockID+"/partition-0-visit-mark.json", string(visitMarkerFileContent), nil)
 			bucketClient.MockUpload(userID+"/"+blockID+"/partition-0-visit-mark.json", nil)
+			bucketClient.MockGet(userID+"/"+blockID+"/"+block.PartitionInfoFilename, "", nil)
 			blockDirectory = append(blockDirectory, userID+"/"+blockID)
 
 			// Get all of the unique group hashes so that they can be used to ensure all groups were compacted
@@ -1268,6 +1285,7 @@ func TestCompactor_ShouldCompactOnlyShardsOwnedByTheInstanceOnShardingEnabledWit
 		bucketClient.MockExists(path.Join(userID, cortex_tsdb.TenantDeletionMarkPath), false, nil)
 		bucketClient.MockGet(userID+"/bucket-index.json.gz", "", nil)
 		bucketClient.MockUpload(userID+"/bucket-index.json.gz", nil)
+		bucketClient.MockIter(userID+"/"+PartitionedGroupDirectory, nil, nil)
 	}
 
 	// Create a shared KV Store
