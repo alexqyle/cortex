@@ -41,8 +41,10 @@ const (
 	// ringKey is the key under which we store the compactors ring in the KVStore.
 	ringKey = "compactor"
 
-	blocksMarkedForDeletionName = "cortex_compactor_blocks_marked_for_deletion_total"
-	blocksMarkedForDeletionHelp = "Total number of blocks marked for deletion in compactor."
+	blocksMarkedForDeletionName      = "cortex_compactor_blocks_marked_for_deletion_total"
+	blocksMarkedForDeletionHelp      = "Total number of blocks marked for deletion in compactor."
+	compactorPartitionErrorCountName = "cortex_compactor_partition_error"
+	compactorPartitionErrorCountHelp = "Count of errors happened during partitioning compaction."
 )
 
 var (

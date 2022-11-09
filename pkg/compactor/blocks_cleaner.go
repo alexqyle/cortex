@@ -2,7 +2,9 @@ package compactor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/cortexproject/cortex/pkg/util/concurrency"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
+	"github.com/cortexproject/cortex/pkg/util/runutil"
 	"github.com/cortexproject/cortex/pkg/util/services"
 )
 
@@ -58,6 +61,7 @@ type BlocksCleaner struct {
 	tenantBlocksMarkedForNoCompaction *prometheus.GaugeVec
 	tenantPartialBlocks               *prometheus.GaugeVec
 	tenantBucketIndexLastUpdate       *prometheus.GaugeVec
+	compactorPartitionError           *prometheus.CounterVec
 	partitionedGroupInfoReadFailed    prometheus.Counter
 }
 
@@ -120,6 +124,11 @@ func NewBlocksCleaner(cfg BlocksCleanerConfig, bucketClient objstore.Bucket, use
 		tenantBucketIndexLastUpdate: promauto.With(reg).NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cortex_bucket_index_last_successful_update_timestamp_seconds",
 			Help: "Timestamp of the last successful update of a tenant's bucket index.",
+		}, []string{"user"}),
+		compactorPartitionError: promauto.With(reg).NewCounterVec(prometheus.CounterOpts{
+			Name:        compactorPartitionErrorCountName,
+			Help:        compactorPartitionErrorCountHelp,
+			ConstLabels: prometheus.Labels{"reason": "parent-block-mismatch"},
 		}, []string{"user"}),
 		partitionedGroupInfoReadFailed: partitionedGroupInfoReadFailed,
 	}
@@ -383,7 +392,7 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 		return err
 	}
 
-	c.cleanPartitionedGroupInfo(ctx, userBucket, userLogger, idx)
+	c.cleanPartitionedGroupInfo(ctx, userBucket, userLogger, userID, idx)
 
 	c.tenantBlocks.WithLabelValues(userID).Set(float64(len(idx.Blocks)))
 	c.tenantBlocksMarkedForDelete.WithLabelValues(userID).Set(float64(len(idx.BlockDeletionMarks)))
@@ -429,7 +438,29 @@ func (c *BlocksCleaner) findResultBlocksForPartitionedGroup(ctx context.Context,
 	return resultBlocks
 }
 
-func (c *BlocksCleaner) cleanPartitionedGroupInfo(ctx context.Context, userBucket objstore.InstrumentedBucket, userLogger log.Logger, index *bucketindex.Index) {
+func (c *BlocksCleaner) validatePartitionedResultBlock(ctx context.Context, userBucket objstore.InstrumentedBucket, userLogger log.Logger, userID string, resultBlock ulid.ULID, partition Partition, partitionedGroupID uint32) error {
+	meta, err := readMeta(ctx, userBucket, userLogger, resultBlock)
+	if err != nil {
+		level.Warn(userLogger).Log("msg", "unable to read meta of result block", "partitioned_group_id", partitionedGroupID, "partition_id", partition.PartitionID, "block", resultBlock.String())
+		return err
+	}
+	expectedSourceBlocks := partition.getBlocksSet()
+	if len(expectedSourceBlocks) != len(meta.Compaction.Parents) {
+		c.compactorPartitionError.WithLabelValues(userID).Inc()
+		level.Warn(userLogger).Log("msg", "result block has different number of parent blocks as partitioned group info", "partitioned_group_id", partitionedGroupID, "partition_id", partition.PartitionID, "block", resultBlock.String())
+		return fmt.Errorf("result block %s has different number of parent blocks as partitioned group info with partitioned group id %d, partition id %d", resultBlock.String(), partitionedGroupID, partition.PartitionID)
+	}
+	for _, parentBlock := range meta.Compaction.Parents {
+		if _, ok := expectedSourceBlocks[parentBlock.ULID]; !ok {
+			c.compactorPartitionError.WithLabelValues(userID).Inc()
+			level.Warn(userLogger).Log("msg", "parent blocks of result block does not match partitioned group info", "partitioned_group_id", partitionedGroupID, "partition_id", partition.PartitionID, "block", resultBlock.String())
+			return fmt.Errorf("parent blocks of result block %s does not match partitioned group info with partitioned group id %d, partition id %d", resultBlock.String(), partitionedGroupID, partition.PartitionID)
+		}
+	}
+	return nil
+}
+
+func (c *BlocksCleaner) cleanPartitionedGroupInfo(ctx context.Context, userBucket objstore.InstrumentedBucket, userLogger log.Logger, userID string, index *bucketindex.Index) {
 	var deletePartitionedGroupInfo []string
 	userBucket.Iter(ctx, PartitionedGroupDirectory, func(file string) error {
 		partitionedGroupInfo, err := ReadPartitionedGroupInfoFile(ctx, userBucket, userLogger, file, c.partitionedGroupInfoReadFailed)
@@ -440,9 +471,16 @@ func (c *BlocksCleaner) cleanPartitionedGroupInfo(ctx context.Context, userBucke
 		resultBlocks := c.findResultBlocksForPartitionedGroup(ctx, userBucket, userLogger, index, partitionedGroupInfo)
 		partitionedGroupID := partitionedGroupInfo.PartitionedGroupID
 		for _, partition := range partitionedGroupInfo.Partitions {
-			if _, ok := resultBlocks[partition.PartitionID]; !ok {
+			if resultBlock, ok := resultBlocks[partition.PartitionID]; !ok {
 				level.Info(userLogger).Log("msg", "unable to find result block for partition in partitioned group", "partitioned_group_id", partitionedGroupID, "partition_id", partition.PartitionID)
 				return nil
+			} else {
+				err := c.validatePartitionedResultBlock(ctx, userBucket, userLogger, userID, resultBlock, partition, partitionedGroupID)
+				if err != nil {
+					level.Warn(userLogger).Log("msg", "validate result block failed", "partitioned_group_id", partitionedGroupID, "partition_id", partition.PartitionID, "block", resultBlock.String(), "err", err)
+					return nil
+				}
+				level.Info(userLogger).Log("msg", "result block has expected parent blocks", "partitioned_group_id", partitionedGroupID, "partition_id", partition.PartitionID, "block", resultBlock.String())
 			}
 		}
 
@@ -561,4 +599,21 @@ func listBlocksOutsideRetentionPeriod(idx *bucketindex.Index, threshold time.Tim
 	}
 
 	return
+}
+
+func readMeta(ctx context.Context, userBucket objstore.InstrumentedBucket, userLogger log.Logger, blockID ulid.ULID) (*metadata.Meta, error) {
+	metaReader, err := userBucket.Get(ctx, path.Join(blockID.String(), block.MetaFilename))
+	if err != nil {
+		return nil, err
+	}
+	defer runutil.CloseWithLogOnErr(userLogger, metaReader, "close meta reader")
+	b, err := io.ReadAll(metaReader)
+	if err != nil {
+		return nil, err
+	}
+	meta := metadata.Meta{}
+	if err = json.Unmarshal(b, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }

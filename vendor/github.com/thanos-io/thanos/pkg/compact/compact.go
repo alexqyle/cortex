@@ -793,14 +793,7 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 
 	subDir := filepath.Join(dir, cg.Key())
 
-	currentCtx, cancel := context.WithCancel(ctx)
-	errChan := make(chan error)
-	isErrChanOpen := true
 	defer func() {
-		if isErrChanOpen {
-			close(errChan)
-		}
-		cancel()
 		// Leave the compact directory for inspection if it is a halt error
 		// or if it is not then so that possibly we would not have to download everything again.
 		if rerr != nil {
@@ -815,23 +808,16 @@ func (cg *Group) Compact(ctx context.Context, dir string, planner Planner, comp 
 		return false, ulid.ULID{}, errors.Wrap(err, "create compaction group dir")
 	}
 
-	err := tracing.DoInSpanWithErr(currentCtx, "compaction_group", func(ctx context.Context) (err error) {
+	errChan := make(chan error, 1)
+	err := tracing.DoInSpanWithErr(ctx, "compaction_group", func(ctx context.Context) (err error) {
 		shouldRerun, compID, err = cg.compact(ctx, subDir, planner, comp, completeChecker, errChan)
 		return err
 	}, opentracing.Tags{"group.key": cg.Key()})
-	select {
-	case _, isErrChanOpen = <-errChan:
-	default:
-	}
+	errChan <- err
+	close(errChan)
 	if err != nil {
-		if isErrChanOpen {
-			errChan <- err
-		}
 		cg.compactionFailures.Inc()
 		return false, ulid.ULID{}, err
-	} else {
-		// Explicitly trigger cancel before return to make sure ctx Done handler could kick in earlier
-		cancel()
 	}
 	cg.compactionRunsCompleted.Inc()
 	return shouldRerun, compID, nil
@@ -1050,7 +1036,6 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 			toCompact, e = planner.PlanWithPartition(ctx, cg.metasByMinTime, cg.partitionID, errChan)
 			return e
 		} else {
-			close(errChan)
 			toCompact, e = planner.Plan(ctx, cg.metasByMinTime)
 			return e
 		}

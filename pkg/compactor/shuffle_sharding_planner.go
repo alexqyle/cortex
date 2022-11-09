@@ -3,6 +3,7 @@ package compactor
 import (
 	"context"
 	"fmt"
+	"github.com/go-kit/log/level"
 	"time"
 
 	"github.com/go-kit/log"
@@ -96,6 +97,7 @@ func (p *ShuffleShardingPlanner) PlanWithPartition(_ context.Context, metasByMin
 	}
 
 	if len(resultMetas) < 2 {
+		level.Info(p.logger).Log("msg", "result meta size is less than 2", "partitioned_group_id", partitionGroupID, "partition_id", partitionID, "size", len(resultMetas))
 		return nil, nil
 	}
 

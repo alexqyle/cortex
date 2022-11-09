@@ -152,7 +152,7 @@ func markBlocksVisitedHeartBeat(
 	level.Info(logger).Log("msg", "start visit marker heart beat", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo)
 	ticker := time.NewTicker(blockVisitMarkerFileUpdateInterval)
 	defer ticker.Stop()
-	var compactionErr error
+	isComplete := false
 heartBeat:
 	for {
 		level.Debug(logger).Log("msg", "visit marker heart beat", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo)
@@ -168,19 +168,19 @@ heartBeat:
 
 		select {
 		case <-ctx.Done():
+			level.Warn(logger).Log("msg", "visit marker heart beat got cancelled", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo)
 			break heartBeat
 		case <-ticker.C:
 			continue
 		case err := <-errChan:
+			isComplete = err == nil
 			if err != nil {
-				// sometimes nil error got pushed to channel.
-				compactionErr = err
 				level.Warn(logger).Log("msg", "stop visit marker heart beat due to error", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo, "err", err)
 			}
 			break heartBeat
 		}
 	}
-	if compactionErr == nil {
+	if isComplete {
 		level.Info(logger).Log("msg", "update visit marker to completed status", "partitioned_group_id", partitionedGroupID, "partition_id", partitionID, "blocks", blocksInfo)
 		markBlocksVisitMarkerCompleted(context.Background(), bkt, logger, blocks, partitionedGroupID, partitionID, compactorID, blockVisitMarkerWriteFailed)
 	}

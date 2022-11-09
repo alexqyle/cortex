@@ -32,6 +32,14 @@ type Partition struct {
 	Blocks      []ulid.ULID `json:"blocks"`
 }
 
+func (p *Partition) getBlocksSet() map[ulid.ULID]struct{} {
+	res := make(map[ulid.ULID]struct{})
+	for _, blockID := range p.Blocks {
+		res[blockID] = struct{}{}
+	}
+	return res
+}
+
 type PartitionedGroupInfo struct {
 	PartitionedGroupID uint32      `json:"partitionedGroupID"`
 	PartitionCount     int         `json:"partitionCount"`
